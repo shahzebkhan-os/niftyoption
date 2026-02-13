@@ -15,7 +15,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 class TrainingPipeline:
-    def __init__(self, symbol="NIFTY", horizon_mins=30, threshold=20):
+    def __init__(self, symbol="NIFTY", horizon_mins=1440, threshold=100):
         self.symbol = symbol
         self.horizon_mins = horizon_mins
         self.threshold = threshold
@@ -59,12 +59,12 @@ class TrainingPipeline:
         # 2. Generate Targets
         logger.info("Generating horizon-based targets...")
         df_features['target'] = self.target_gen.generate_target(
-            df_features.reset_index(), 
+            df_features, 
             price_col='underlying_price', 
             time_col='timestamp'
-        ).values
+        )
         
-        return df_features.dropna()
+        return df_features.dropna(subset=['target'])
 
     def run_training(self, start_date, end_date):
         """Orchestrates the training of regime-specific models."""
@@ -84,7 +84,8 @@ class TrainingPipeline:
         # to focus on core predictive signal.
         feature_cols = [
             'iv_percentile', 'iv_zscore', 'oi_velocity', 'oi_acceleration', 
-            'divergence', 'trap_score', 'net_gex'
+            'divergence', 'trap_score', 'net_gex',
+            'delta', 'gamma', 'theta', 'vega', 'iv'
         ]
         
         # Train specialized model for each regime
@@ -102,7 +103,7 @@ class TrainingPipeline:
 if __name__ == "__main__":
     # Example usage: Train on last 30 days
     end = datetime.now()
-    start = end - timedelta(days=30)
+    start = end - timedelta(days=180) # 6 months
     
     pipeline = TrainingPipeline(symbol=settings.SYMBOL)
     pipeline.run_training(start, end)

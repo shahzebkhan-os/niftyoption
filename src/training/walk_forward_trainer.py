@@ -39,6 +39,9 @@ class WalkForwardTrainer:
             return None
 
         # 2. Split into Train/Validate (Strict Temporal Split)
+        # We ensure chronological order before splitting
+        df_regime = df_regime.sort_values('timestamp')
+        
         # We use the first 80% for training and last 20% for pure OOS Validation
         split_idx = int(len(df_regime) * 0.8)
         df_train = df_regime.iloc[:split_idx]

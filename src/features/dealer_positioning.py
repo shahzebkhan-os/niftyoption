@@ -7,7 +7,8 @@ def compute_gex(df: pd.DataFrame, lot_size=50):
     """
     # GEX = Gamma * OI * LotSize * Spot
     # Note: df must have 'gamma', 'oi', 'strike', and 'underlying_price'
-    # We use 'underlying_price' as the spot.
+    # Ensure unique columns to avoid ReindexingError during alignment
+    df = df.loc[:, ~df.columns.duplicated()].copy()
     
     df['gex'] = df['gamma'] * df['oi'] * lot_size * df['underlying_price']
     
@@ -15,9 +16,15 @@ def compute_gex(df: pd.DataFrame, lot_size=50):
     # Typically: Long Calls = Short Dealer gamma, Long Puts = Short Dealer gamma
     # Net GEX is usually Call GEX - Put GEX (Simplified)
     
-    net_gex = df.groupby('timestamp').apply(
-        lambda x: (x[x['option_type'] == 'CE']['gex'].sum() - x[x['option_type'] == 'PE']['gex'].sum())
-    ).rename("net_gex")
+    # Net GEX is Call GEX - Put GEX
+    # We group by timestamp and sum GEX per type, then pivot or calculate difference
+    gex_sums = df.groupby(['timestamp', 'option_type'])['gex'].sum().unstack(fill_value=0)
+    
+    # Ensure both PE and CE columns exist
+    if 'CE' not in gex_sums.columns: gex_sums['CE'] = 0.0
+    if 'PE' not in gex_sums.columns: gex_sums['PE'] = 0.0
+    
+    net_gex = (gex_sums['CE'] - gex_sums['PE']).rename("net_gex")
 
     return net_gex
 

@@ -22,3 +22,6 @@ pydantic-settings
 tenacity
 streamlit
 plotly
+growwapi
+python-json-logger
+tqdm

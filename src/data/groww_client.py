@@ -3,7 +3,7 @@ import logging
 import asyncio
 import aiohttp
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -22,6 +22,42 @@ class GrowwClient:
             "Content-Type": "application/json",
             "Accept": "application/json"
         }
+
+    async def get_historical_candles(self, symbol="NIFTY", start_time=None, end_time=None, interval=1):
+        """
+        Fetches historical candles using the internal charting_service endpoint.
+        start_time/end_time: datetime objects or ISO strings.
+        interval: 1, 5, 15, 30, 60, 1440.
+        """
+        # Convert times to milliseconds
+        if isinstance(start_time, str):
+            start_ts = int(datetime.fromisoformat(start_time.replace("Z", "+00:00")).timestamp() * 1000)
+        elif isinstance(start_time, datetime):
+            start_ts = int(start_time.timestamp() * 1000)
+        else:
+            start_ts = int((datetime.now() - timedelta(days=30)).timestamp() * 1000)
+
+        if isinstance(end_time, str):
+            end_ts = int(datetime.fromisoformat(end_time.replace("Z", "+00:00")).timestamp() * 1000)
+        elif isinstance(end_time, datetime):
+            end_ts = int(end_time.timestamp() * 1000)
+        else:
+            end_ts = int(datetime.now().timestamp() * 1000)
+
+        # Map symbol segments
+        # Indices are usually NSE/CASH
+        exchange = "NSE"
+        segment = "CASH"
+        
+        endpoint = f"/v1/api/charting_service/v2/chart/exchange/{exchange}/segment/{segment}/{symbol}"
+        params = {
+            "startTimeInMillis": start_ts,
+            "endTimeInMillis": end_ts,
+            "intervalInMinutes": interval
+        }
+
+        async with aiohttp.ClientSession() as session:
+            return await self._get(session, endpoint, params)
 
     async def _post(self, session, endpoint, data=None):
         url = f"{self.base_url}{endpoint}"
@@ -168,7 +204,7 @@ class GrowwClient:
                 if c.get('ce', {}).get('growwContractId'): contract_ids.append(c['ce']['growwContractId'])
                 if c.get('pe', {}).get('growwContractId'): contract_ids.append(c['pe']['growwContractId'])
             
-            if contract_ids:
+            if contract_ids and data is not None:
                 live_data = await self.get_live_prices(contract_ids)
                 # Inject back into data for the parser
                 data['_live_prices'] = live_data

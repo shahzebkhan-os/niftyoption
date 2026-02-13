@@ -19,8 +19,8 @@ def compute_divergence(df: pd.DataFrame, lookback=10):
     Negative divergence = Price down, OI up (potentially aggressive selling).
     """
     # Requires 'close' (underlying_price) and 'oi'
-    df['price_mom'] = df.groupby(['strike', 'option_type'])['underlying_price'].pct_change(lookback)
-    df['oi_mom'] = df.groupby(['strike', 'option_type'])['oi'].pct_change(lookback)
+    df['price_mom'] = df.groupby(['strike', 'option_type'])['underlying_price'].pct_change(lookback, fill_method=None)
+    df['oi_mom'] = df.groupby(['strike', 'option_type'])['oi'].pct_change(lookback, fill_method=None)
 
     df['divergence'] = df['price_mom'] - df['oi_mom']
     return df

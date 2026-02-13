@@ -27,7 +27,7 @@ class MarketDataFetcher:
             
             if not raw_chain:
                 logger.warning("No option chain data received.")
-                return
+                return []
 
             # 2. Store Raw Data (Audit Trail)
             raw_log = RawDataLog(
@@ -45,21 +45,29 @@ class MarketDataFetcher:
                  logger.info(f"Parsed {len(snapshots_data)} snapshots. Sample Spot: {sample_price}")
             
             for item in snapshots_data:
-                # Convert date strings to datetime if needed
-                # ensuring expiry is datetime object, assuming ISO format for now
-                # item['expiry'] = datetime.fromisoformat(item['expiry']) 
-                
                 snapshot = OptionChainSnapshot(**item)
                 session.add(snapshot)
             
             session.commit()
             logger.info(f"Stored {len(snapshots_data)} option snapshots.")
+            return snapshots_data
 
         except Exception as e:
             logger.error(f"Error in fetch_and_store: {e}")
             session.rollback()
+            return []
         finally:
             session.close()
+
+    async def get_latest_data(self):
+        """
+        Triggers a fresh fetch and returns a DataFrame.
+        """
+        import pandas as pd
+        data = await self.fetch_and_store()
+        if not data:
+            return pd.DataFrame()
+        return pd.DataFrame(data)
 
     async def run_loop(self):
         """

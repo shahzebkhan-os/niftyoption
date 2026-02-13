@@ -9,25 +9,40 @@ class TargetGenerator:
     def generate_target(self, df: pd.DataFrame, price_col='underlying_price', time_col='timestamp') -> pd.Series:
         """
         Generates binary target: 1 if |Price(t+T) - Price(t)| > X, else 0.
+        Uses time-based shifting to handle multiple rows per timestamp.
         """
-        # Ensure df is sorted by time
-        df = df.sort_values(by=time_col)
+        if df.empty:
+            return pd.Series(dtype=float)
+
+        # 1. Get unique price-time series
+        ts_price = df.groupby(time_col)[price_col].first().sort_index().to_frame()
         
-        # Calculate future price (shift backwards)
-        # Assumes dataframe has uniform 1-minute intervals or re-sampled
-        # If not, need to use time-based indexing. 
-        # For simplicity, assuming df is 1-min resampled.
+        # 2. Use a rounded index for mapping to ensure 1-min alignment
+        # We round original timestamps to the nearest minute for the lookup
+        ts_price['lookup_time'] = ts_price.index.round('1min')
         
-        future_price = df[price_col].shift(-self.horizon_minutes)
+        # 3. Create a continuous 1-min range for shifting
+        start, end = ts_price['lookup_time'].min(), ts_price['lookup_time'].max()
+        all_minutes = pd.date_range(start=start, end=end, freq='1min')
         
-        price_change = (future_price - df[price_col]).abs()
+        # 4. Map existing prices to the 1-min grid
+        grid_price = ts_price.groupby('lookup_time')[price_col].first().reindex(all_minutes).ffill()
         
-        target = (price_change > self.threshold_points).astype(int)
+        # 5. Calculate future price on the grid
+        future_grid_price = grid_price.shift(-self.horizon_minutes)
         
-        # Mask the last 'horizon' rows as they don't have targets
-        target.iloc[-self.horizon_minutes:] = np.nan
+        # 6. Map back to original timestamps using lookup_time
+        ts_price['future_price'] = ts_price['lookup_time'].map(future_grid_price)
         
-        return target
+        # 7. Calculate target
+        ts_price['price_change'] = (ts_price['future_price'] - ts_price[price_col]).abs()
+        ts_price['target'] = (ts_price['price_change'] > self.threshold_points).astype(float)
+        
+        # Mask NaNs (where future_price was NaN)
+        ts_price.loc[ts_price['future_price'].isna(), 'target'] = np.nan
+        
+        # 8. Map back to original dataframe
+        return df[time_col].map(ts_price['target'])
 
     def generate_directional_target(self, df: pd.DataFrame, price_col='underlying_price') -> pd.Series:
         """

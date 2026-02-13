@@ -165,12 +165,17 @@ class BacktestService:
         slippage = exec_config.get('slippage', 0.0005)
         fee = exec_config.get('fee', 0.0003)
         
+        # Risk Configuration
+        max_positions = risk_config.get('max_open_positions', 1)
+        kelly_fraction = risk_config.get('kelly_fraction', 0.2) # Default to 0.2 for conservative growth
+        
         # Simulation State
         equity_curve = []
         trades = []
         position = None
         cooldown = 0
         pending_signal = None
+        open_positions = [] # Track concurrent positions
         
         # Risk State
         daily_pnl = 0
@@ -188,69 +193,77 @@ class BacktestService:
                 daily_pnl = 0
                 last_date = cur_date
 
-            # Update Equity
-            cur_price = row['close']
+            # Update Equity & Handle Exits
+            cur_price = float(row['close'])
             ec_val = capital
-            if position:
-                pnl = (cur_price - position['entry']) / position['entry'] if position['direction'] == 'LONG' else \
-                      (position['entry'] - cur_price) / position['entry']
-                ec_val += pnl * position['size']
-            equity_curve.append({'ts': timestamp, 'equity': ec_val})
             
-            # 1. Handle Exits First
-            if position:
-                exit_price, reason = self._check_exit(row, position, slippage)
+            exited_positions = []
+            for pos in open_positions:
+                # 1. Handle Exits
+                exit_price, reason = self._check_exit(row, pos, slippage)
                 if exit_price:
-                    pnl_pct = (exit_price - position['entry']) / position['entry'] if position['direction'] == 'LONG' else \
-                              (position['entry'] - exit_price) / position['entry']
-                    pnl_raw = pnl_pct * position['size']
-                    # Total roundtrip cost
-                    costs = (position['size'] * fee) + (position['size'] * (1 + pnl_pct) * fee)
+                    pnl_pct = (exit_price - pos['entry']) / pos['entry'] if pos['direction'] == 'LONG' else \
+                              (pos['entry'] - exit_price) / pos['entry']
+                    pnl_raw = pnl_pct * pos['size']
+                    costs = (pos['size'] * fee) + (pos['size'] * (1 + pnl_pct) * fee)
                     net_pnl = pnl_raw - costs
                     
                     capital += net_pnl
                     daily_pnl += net_pnl
                     
                     trades.append({
-                        'entry_ts': position['entry_ts'],
+                        'entry_ts': pos['entry_ts'],
                         'exit_ts': timestamp,
-                        'entry': position['entry'],
+                        'entry': pos['entry'],
                         'exit': exit_price,
                         'net_pnl': net_pnl,
                         'costs': costs,
-                        'reason': reason
+                        'reason': reason,
+                        'pnl': net_pnl # Added for win_rate metric
                     })
-                    position = None
-                    if net_pnl < 0: cooldown = 3 # Cooldown after loss
-                continue
-
+                    exited_positions.append(pos)
+                else:
+                    # Unrealized PnL for equity curve
+                    pnl = (cur_price - pos['entry']) / pos['entry'] if pos['direction'] == 'LONG' else \
+                          (pos['entry'] - cur_price) / pos['entry']
+                    ec_val += pnl * pos['size']
+            
+            for pos in exited_positions:
+                open_positions.remove(pos)
+                
+            equity_curve.append({'ts': timestamp, 'equity': ec_val})
+            
             # 2. Daily Drawdown Check
             if daily_pnl < -max_daily_loss:
-                # Stop for the day
                 continue
 
             # 3. Handle Pending Entries (1-bar delay)
-            if pending_signal and not position:
-                # Enter at Current Open (T+1) with Slippage
-                entry_price = row['open'] * (1 + slippage) if pending_signal['direction'] == 'LONG' else \
-                              row['open'] * (1 - slippage)
+            if pending_signal and len(open_positions) < max_positions:
+                entry_price = float(row['open']) * (1 + slippage) if pending_signal['direction'] == 'LONG' else \
+                              float(row['open']) * (1 - slippage)
                 
                 direction = pending_signal['direction']
-                risk_pct = risk_config.get('risk_per_trade', 0.01)
-                pos_size = capital * risk_pct * 10 # Heuristic sizing
                 
-                # ATR based stops
-                sl_dist = row['atr'] * 2 if 'atr' in row else row['close'] * 0.01
+                # --- Fractional Kelly Sizing ---
+                p = float(pending_signal['prob'])
+                win_loss_ratio = 2.0
+                kelly_f = (p * win_loss_ratio - (1 - p)) / win_loss_ratio
+                kelly_f = max(0, min(1, kelly_f))
                 
-                position = {
+                pos_size = capital * kelly_f * kelly_fraction
+                
+                sl_dist = float(row['atr']) * 2 if 'atr' in row and not pd.isna(row['atr']) else cur_price * 0.01
+                
+                new_pos = {
                     'entry_ts': timestamp,
                     'entry': entry_price,
                     'size': pos_size,
                     'stop': entry_price - sl_dist if direction == 'LONG' else entry_price + sl_dist,
                     'target': entry_price + (sl_dist * 2) if direction == 'LONG' else entry_price - (sl_dist * 2),
                     'direction': direction,
-                    'prob': pending_signal['prob']
+                    'prob': p
                 }
+                open_positions.append(new_pos)
                 pending_signal = None
                 continue
 

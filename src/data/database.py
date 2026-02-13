@@ -1,6 +1,6 @@
 import logging
 import time
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, JSON, BigInteger, Index
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, JSON, BigInteger, Index, UniqueConstraint
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime
@@ -44,6 +44,7 @@ class OptionChainSnapshot(Base):
 
     __table_args__ = (
         Index('idx_timestamp_expiry_strike', 'timestamp', 'expiry', 'strike'),
+        UniqueConstraint('timestamp', 'expiry', 'strike', 'option_type', 'symbol', name='idx_unique_snapshot'),
     )
 
 class RawDataLog(Base):

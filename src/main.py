@@ -84,7 +84,7 @@ class OptionsEngine:
             await self.initialize_monitoring_data()
 
         # 1. Fetch Latest Data
-        df = self.fetcher.get_latest_data()
+        df = await self.fetcher.get_latest_data()
         
         # Fallback to DB if fetcher is empty
         if df.empty:
@@ -155,7 +155,7 @@ class OptionsEngine:
         init_db()
         await self.initialize_monitoring_data()
         
-        await self.telegram.send_broadcast(f"🚀 Options Intelligence Engine ONLINE (Symbol: {settings.SYMBOL})")
+        await self.telegram.send_message(f"🚀 Options Intelligence Engine ONLINE (Symbol: {settings.SYMBOL})")
         
         while True:
             try:

@@ -5,6 +5,7 @@ import joblib
 import os
 import pandas as pd
 import logging
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -30,34 +31,53 @@ class RegimeTrainer:
         y = df_regime[target_column]
 
         # 1. Stability Audit (Manual Cross-Validation)
-        tscv = TimeSeriesSplit(n_splits=5)
+        # Reducing to 4 splits given the limited number of unique trading days
+        tscv = TimeSeriesSplit(n_splits=4)
         fold_auc = []
         
-        logger.info(f"Auditing stability for {self.regime_name}...")
+        logger.info(f"Auditing stability for {self.regime_name} across 4 folds...")
         for train_idx, val_idx in tscv.split(X):
             X_tr, X_val = X.iloc[train_idx], X.iloc[val_idx]
             y_tr, y_val = y.iloc[train_idx], y.iloc[val_idx]
             
-            fold_model = lgb.LGBMClassifier(n_estimators=100, learning_rate=0.1, max_depth=4, verbose=-1)
+            # Use smaller estimators and shallow trees to detect foundational instability
+            fold_model = lgb.LGBMClassifier(
+                n_estimators=50, 
+                learning_rate=0.1, 
+                max_depth=3, 
+                reg_alpha=0.1,
+                reg_lambda=0.1,
+                verbose=-1
+            )
             fold_model.fit(X_tr, y_tr)
             
             from sklearn.metrics import roc_auc_score
             preds = fold_model.predict_proba(X_val)[:, 1]
-            fold_auc.append(roc_auc_score(y_val, preds))
+            try:
+                fold_auc.append(roc_auc_score(y_val, preds))
+            except:
+                continue # Skip folds with only one class
         
-        auc_std = np.std(fold_auc)
-        logger.info(f"Stability Audit: Mean AUC={np.mean(fold_auc):.4f}, Std={auc_std:.4f}")
-
-        # Overfitting Defense: If variance across folds is too high, the model is unstable
-        if auc_std > 0.15:
-            logger.warning(f"REJECTED: Model stability too low (Std={auc_std:.4f}). High risk of overfitting.")
+        if not fold_auc:
+            logger.warning(f"REJECTED: No valid AUC folds for {self.regime_name}.")
             return None
 
+        auc_std = np.std(fold_auc)
+        mean_auc = np.mean(fold_auc)
+        logger.info(f"Stability Audit: Mean AUC={mean_auc:.4f}, Std={auc_std:.4f}")
+
+        # Final stability check
+        if np.isnan(mean_auc) or (len(fold_auc) > 1 and auc_std > 0.15) or mean_auc < 0.51:
+            logger.warning(f"REJECTED: Model stability/performance too low (Std={auc_std:.4f}, Mean={mean_auc:.4f}).")
+            return None
+        
         # 2. Final Calibrated Training
         base_model = lgb.LGBMClassifier(
-            n_estimators=500,
-            learning_rate=0.05,
-            max_depth=6,
+            n_estimators=200,
+            learning_rate=0.03,
+            max_depth=3,
+            reg_alpha=1.0,
+            reg_lambda=1.0,
             importance_type='gain',
             verbose=-1
         )
