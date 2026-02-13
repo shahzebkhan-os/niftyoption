@@ -25,7 +25,6 @@ class GrowwClient:
         self.symbol_map = {
             "BANKNIFTY": {"chain": "NIFTY-BANK", "spot": "BANKNIFTY"},
             "NIFTYBANK": {"chain": "NIFTY-BANK", "spot": "BANKNIFTY"},
-            "FINNIFTY": {"chain": "NIFTY-FINANCIAL-SERVICES", "spot": "FINNIFTY"},
             "NIFTY": {"chain": "NIFTY", "spot": "NIFTY"}
         }
 

@@ -96,11 +96,10 @@ class OptionsEngine:
             self.fetcher.symbol = symbol
             df = await self.fetcher.get_latest_data()
             
-            # Fallback to DB if fetcher is empty
+            # Fallback to DB removed to ensure only current data is used
             if df.empty:
-                with get_session() as session:
-                    query = session.query(OptionChainSnapshot).filter(OptionChainSnapshot.symbol == symbol).order_by(OptionChainSnapshot.timestamp.desc()).limit(200)
-                    df = pd.read_sql(query.statement, session.bind)
+                logger.warning(f"No live data snapshots collected for {symbol}.")
+                continue
             
             if df.empty:
                 logger.warning(f"No data snapshots collected for {symbol}.")

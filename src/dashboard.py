@@ -104,7 +104,7 @@ def fetch_regime_data(df_latest, symbol="NIFTY"):
 # Sidebar
 st.sidebar.title("🛠️ Engine Control")
 st.sidebar.info(f"Connected to: `{settings.POSTGRES_DB}`")
-symbol = st.sidebar.selectbox("Symbol", ["NIFTY", "BANKNIFTY", "FINNIFTY"])
+symbol = st.sidebar.selectbox("Symbol", ["NIFTY", "BANKNIFTY"])
 refresh_rate = st.sidebar.slider("Refresh (s)", 5, 60, 10)
 
 # Main Title

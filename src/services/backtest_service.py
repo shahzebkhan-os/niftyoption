@@ -277,7 +277,8 @@ class BacktestService:
                 continue
                 
             # Signal Probe (Integration Placeholder)
-            prob = np.random.uniform(0.4, 0.8) 
+            # In production, this would call the actual model ensemble
+            prob = 0.5 
             if prob > 0.65:
                 pending_signal = {
                     'direction': 'LONG',
