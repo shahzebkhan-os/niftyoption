@@ -165,16 +165,29 @@ class BacktestService:
         slippage = exec_config.get('slippage', 0.0005)
         fee = exec_config.get('fee', 0.0003)
         
+        # Simulation State
         equity_curve = []
         trades = []
         position = None
         cooldown = 0
+        pending_signal = None
         
+        # Risk State
+        daily_pnl = 0
+        last_date = None
+        max_daily_loss = risk_config.get('max_daily_loss_pct', 0.02) * initial_capital
+
         # Simulation Loop
         for i in range(len(df)):
             row = df.iloc[i]
             timestamp = df.index[i]
             
+            # Reset daily pnl on new day
+            cur_date = timestamp.date()
+            if cur_date != last_date:
+                daily_pnl = 0
+                last_date = cur_date
+
             # Update Equity
             cur_price = row['close']
             ec_val = capital
@@ -184,53 +197,73 @@ class BacktestService:
                 ec_val += pnl * position['size']
             equity_curve.append({'ts': timestamp, 'equity': ec_val})
             
-            # Exit Logic
+            # 1. Handle Exits First
             if position:
                 exit_price, reason = self._check_exit(row, position, slippage)
                 if exit_price:
-                    # Close trade
                     pnl_pct = (exit_price - position['entry']) / position['entry'] if position['direction'] == 'LONG' else \
                               (position['entry'] - exit_price) / position['entry']
                     pnl_raw = pnl_pct * position['size']
+                    # Total roundtrip cost
                     costs = (position['size'] * fee) + (position['size'] * (1 + pnl_pct) * fee)
                     net_pnl = pnl_raw - costs
+                    
                     capital += net_pnl
+                    daily_pnl += net_pnl
                     
                     trades.append({
                         'entry_ts': position['entry_ts'],
                         'exit_ts': timestamp,
                         'entry': position['entry'],
                         'exit': exit_price,
-                        'pnl': net_pnl,
+                        'net_pnl': net_pnl,
+                        'costs': costs,
                         'reason': reason
                     })
                     position = None
-                    if net_pnl < 0: cooldown = 3 # Simple cooldown
+                    if net_pnl < 0: cooldown = 3 # Cooldown after loss
                 continue
 
-            # Entry Logic
+            # 2. Daily Drawdown Check
+            if daily_pnl < -max_daily_loss:
+                # Stop for the day
+                continue
+
+            # 3. Handle Pending Entries (1-bar delay)
+            if pending_signal and not position:
+                # Enter at Current Open (T+1) with Slippage
+                entry_price = row['open'] * (1 + slippage) if pending_signal['direction'] == 'LONG' else \
+                              row['open'] * (1 - slippage)
+                
+                direction = pending_signal['direction']
+                risk_pct = risk_config.get('risk_per_trade', 0.01)
+                pos_size = capital * risk_pct * 10 # Heuristic sizing
+                
+                # ATR based stops
+                sl_dist = row['atr'] * 2 if 'atr' in row else row['close'] * 0.01
+                
+                position = {
+                    'entry_ts': timestamp,
+                    'entry': entry_price,
+                    'size': pos_size,
+                    'stop': entry_price - sl_dist if direction == 'LONG' else entry_price + sl_dist,
+                    'target': entry_price + (sl_dist * 2) if direction == 'LONG' else entry_price - (sl_dist * 2),
+                    'direction': direction,
+                    'prob': pending_signal['prob']
+                }
+                pending_signal = None
+                continue
+
+            # 4. Signal Detection (T -> T+1 entry)
             if cooldown > 0:
                 cooldown -= 1
                 continue
                 
-            # Signal Detection (Mocked for now, integrate with models later)
-            prob = np.random.uniform(0.4, 0.8) # Placeholder
+            # Signal Probe (Integration Placeholder)
+            prob = np.random.uniform(0.4, 0.8) 
             if prob > 0.65:
-                direction = 'LONG'
-                risk_pct = risk_config.get('risk_per_trade', 0.01)
-                pos_size = capital * risk_pct * 10 # Leverage example
-                
-                # Check Stop Realism
-                sl_dist = row['atr'] * 2 if 'atr' in row else row['close'] * 0.01
-                tp_dist = sl_dist * 2
-                
-                position = {
-                    'entry_ts': timestamp,
-                    'entry': row['close'] * (1 + slippage),
-                    'size': pos_size,
-                    'stop': row['close'] - sl_dist if direction == 'LONG' else row['close'] + sl_dist,
-                    'target': row['close'] + tp_dist if direction == 'LONG' else row['close'] - tp_dist,
-                    'direction': direction,
+                pending_signal = {
+                    'direction': 'LONG',
                     'prob': prob
                 }
 

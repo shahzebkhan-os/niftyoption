@@ -24,7 +24,7 @@ class WalkForwardTrainer:
 
     def run_regime_cycle(self, df, regime, feature_columns, target_column):
         """
-        Orchestrates retraining for a specific regime.
+        Orchestrates retraining for a specific regime with strict OOS gating.
         """
         logger.info(f"--- Walk-Forward Cycle: {regime} ---")
         
@@ -32,41 +32,46 @@ class WalkForwardTrainer:
         latest_date = df['timestamp'].max()
         start_date = latest_date - pd.DateOffset(months=self.window_months)
         df_window = df[df['timestamp'] >= start_date]
-        
-        # 2. Train New Model Candidate
+        df_regime = df_window[df_window['regime'] == regime]
+
+        if len(df_regime) < 150:
+            logger.warning(f"Insufficient data for {regime} walk-forward. Skipping.")
+            return None
+
+        # 2. Split into Train/Validate (Strict Temporal Split)
+        # We use the first 80% for training and last 20% for pure OOS Validation
+        split_idx = int(len(df_regime) * 0.8)
+        df_train = df_regime.iloc[:split_idx]
+        df_val = df_regime.iloc[split_idx:]
+
+        # 3. Train New Model Candidate on Train set
         trainer = RegimeTrainer(regime_name=regime, model_dir="models/candidates")
-        new_model = trainer.train(df_window, feature_columns, target_column)
+        new_model = trainer.train(df_train, feature_columns, target_column)
         
         if new_model is None:
             return None
 
-        # 3. Evaluate New Candidate
-        # Note: We evaluate on the SAME window for comparison
-        new_metrics = self.evaluator.evaluate(new_model, df_window[df_window['regime'] == regime], 
-                                               feature_columns, target_column)
-        logger.info(f"New Model metrics: AUC={new_metrics['auc']:.4f}, Brier={new_metrics['brier']:.4f}")
+        # 4. Evaluate on OOS Validate set
+        new_metrics = self.evaluator.evaluate(new_model, df_val, feature_columns, target_column)
+        logger.info(f"OOS Validation metrics: AUC={new_metrics['auc']:.4f}, Brier={new_metrics['brier']:.4f}")
 
-        # 4. Benchmarking & Gating
+        # 5. Benchmarking & Gating
         current_model = self.registry.get_model(regime)
         if current_model:
-            current_metrics = self.evaluator.evaluate(current_model, df_window[df_window['regime'] == regime], 
-                                                     feature_columns, target_column)
-            logger.info(f"Current Model metrics: AUC={current_metrics['auc']:.4f}, Brier={current_metrics['brier']:.4f}")
+            # We must compare on the SAME OOS set for fairness
+            current_metrics = self.evaluator.evaluate(current_model, df_val, feature_columns, target_column)
+            logger.info(f"Benchmark OOS metrics: AUC={current_metrics['auc']:.4f}, Brier={current_metrics['brier']:.4f}")
             
-            # GATING LOGIC: Deploy only if improved
+            # GATING LOGIC: Deploy only if improved on UNSEEN data
             if new_metrics['auc'] > (current_metrics['auc'] + self.min_auc_gain):
-                logger.info(f"PROMOTION GRANTED: Candidate improves on benchmark ({new_metrics['auc']:.4f} > {current_metrics['auc']:.4f})")
-                
-                # Promote via Version Manager
+                logger.info(f"PROMOTION GRANTED: Candidate improves on OOS benchmark.")
                 temp_path = os.path.join("models/candidates", f"{regime}_model.pkl")
-                final_path = self.version_manager.promote_model(regime, temp_path)
-                return final_path
+                return self.version_manager.promote_model(regime, temp_path)
             else:
-                logger.warning(f"PROMOTION REJECTED: Candidate failed to beat benchmark significantly.")
+                logger.warning(f"PROMOTION REJECTED: Candidate failed OOS validation.")
                 return None
         else:
-            # First time training this regime, promote immediately
-            logger.info("PROMOTION GRANTED: No existing model found. First deployment.")
+            logger.info("PROMOTION GRANTED: First deployment.")
             temp_path = os.path.join("models/candidates", f"{regime}_model.pkl")
             return self.version_manager.promote_model(regime, temp_path)
 

@@ -87,15 +87,16 @@ def build_features(df: pd.DataFrame, lag_safety=True):
 
     # 6. MANDATORY LAG SAFETY (Shield against leakage)
     if lag_safety and not df.empty:
-        # We shift features forward by 1 observation to ensure 
-        # that at time T, the model only has information from T-1.
-        feature_cols = [
+        # We shift features AND labels (regime) forward by 1 observation 
+        # to ensure that at time T, the model selection and input features 
+        # only use information that was available at T-1.
+        shift_cols = [
             'iv_percentile', 'iv_zscore', 'oi_velocity', 'oi_acceleration', 
             'divergence', 'trap_score', 'net_gex', 
-            'regime_encoded', 'regime_confidence', 'regime_stability'
+            'regime', 'regime_encoded', 'regime_confidence', 'regime_stability'
         ]
-        df[feature_cols] = df.groupby(['strike', 'option_type'])[feature_cols].shift(1)
-        df = df.dropna(subset=feature_cols)
+        df[shift_cols] = df.groupby(['strike', 'option_type'])[shift_cols].shift(1)
+        df = df.dropna(subset=shift_cols)
 
     logger.info(f"Feature engineering complete. Final shape: {df.shape}")
     return df
