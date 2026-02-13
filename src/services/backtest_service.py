@@ -1,0 +1,282 @@
+import asyncio
+import concurrent.futures
+import pandas as pd
+import numpy as np
+import logging
+from concurrent.futures import ProcessPoolExecutor
+from datetime import datetime, timedelta
+from src.strategy.regime_classifier import RegimeClassifier
+from src.strategy.risk_manager import RiskManager
+from src.data.database import get_engine, get_session, OptionChainSnapshot
+from sqlalchemy import text
+
+logger = logging.getLogger(__name__)
+
+class BacktestService:
+    def __init__(self):
+        self.regime_classifier = RegimeClassifier()
+        self.risk_manager = RiskManager()
+        
+    async def run_backtest(self, config: dict):
+        """
+        Main entry point for running a backtest session.
+        config keys: start_date, end_date, interval, indicators, risk, execution, model_id
+        """
+        logger.info(f"Initializing backtest for {config.get('symbol', 'NIFTY')}...")
+        
+        # 1. Load Data
+        df = await self._load_data(config)
+        if df.empty:
+            return {"error": "Insufficient data for selected range."}
+            
+        # 2. Resample & Prep Features
+        df = self._prepare_data(df, config)
+        
+        # 3. Execution (Event-Driven Loop)
+        # Shift simulation to ProcessPool for heavy lifting if range is large
+        results = self._simulate(df, config)
+        
+        # 4. Save to DB for comparison
+        self._save_results(results, config)
+        
+        return results
+
+    async def _load_data(self, config):
+        """Loads historical option chain and underlying data from DB."""
+        start = config.get('start_date')
+        end = config.get('end_date')
+        symbol = config.get('symbol', 'NIFTY')
+        
+        engine = get_engine()
+        # Query for underlying spot prices primarily (or most liquid ATM)
+        # Assuming we need a 'clean' time-series of the underlying
+        # Make end date inclusive by adding 1 day or using < next day
+        try:
+            end_dt = datetime.strptime(end, '%Y-%m-%d') + timedelta(days=1)
+            end_str = end_dt.strftime('%Y-%m-%d')
+        except:
+            end_str = end
+
+        query = f"""
+        SELECT timestamp, MAX(underlying_price) as close, SUM(volume) as volume, 
+               AVG(underlying_price) as open, MAX(underlying_price) as high, MIN(underlying_price) as low
+        FROM option_chain_snapshots
+        WHERE symbol = '{symbol}' 
+          AND timestamp >= '{start}' 
+          AND timestamp < '{end_str}'
+          AND underlying_price IS NOT NULL
+        GROUP BY timestamp
+        ORDER BY timestamp ASC
+        """
+        with engine.connect() as conn:
+            df = pd.read_sql(text(query), conn)
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+            df.set_index('timestamp', inplace=True)
+            return df
+
+    def _prepare_data(self, df, config):
+        """Advanced feature engineering with custom parameterization."""
+        interval = config.get('interval', '1m')
+        ind = config.get('indicators', {})
+        
+        # 1. Resample
+        df = df.resample(interval).agg({
+            'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
+        }).ffill()
+        
+        # 2. Institutional Indicators
+        # EMA Stack
+        for period in ind.get('ema_periods', [9, 21, 50]):
+            df[f'ema_{period}'] = df['close'].ewm(span=period, adjust=False).mean()
+            
+        # ATR window
+        df['atr'] = self._calculate_atr(df, ind.get('atr_window', 14))
+        
+        # OI Velocity Proxy (if data available)
+        # Note: In real setup, we'd query OI separately from the snapshots
+        df['oi_velocity'] = df['volume'].rolling(window=ind.get('oi_smoothing', 5)).mean().pct_change()
+        
+        # GEX / Trap Detection Proxy Logic
+        df['trap_score'] = (df['close'] - df['ema_21']).abs() * ind.get('trap_sensitivity', 1.0)
+        
+        return df
+
+    def _calculate_atr(self, df, window):
+        high_low = df['high'] - df['low']
+        high_pc = (df['high'] - df['close'].shift()).abs()
+        low_pc = (df['low'] - df['close'].shift()).abs()
+        tr = pd.concat([high_low, high_pc, low_pc], axis=1).max(axis=1)
+        return tr.rolling(window=window).mean()
+
+    async def run_parameter_sweep(self, base_config: dict, sweep_options: dict):
+        """Runs multiple backtests across a grid of parameters using multi-processing."""
+        # 1. Generate combinations
+        ema_stack = sweep_options.get('ema_periods', [[9, 21], [21, 50], [9, 50]])
+        risk_stack = sweep_options.get('risk_multipliers', [1.0, 1.5, 2.0])
+        
+        combinations = []
+        for ema in ema_stack:
+            for risk in risk_stack:
+                cfg = base_config.copy()
+                cfg['indicators'] = cfg['indicators'].copy()
+                cfg['indicators']['ema_periods'] = ema
+                cfg['risk'] = cfg['risk'].copy()
+                cfg['risk']['risk_multiplier'] = risk
+                combinations.append(cfg)
+        
+        logger.info(f"Starting Parameter Sweep: {len(combinations)} combinations.")
+        
+        # 2. Load Data Once
+        df = await self._load_data(base_config)
+        if df.empty: return {"error": "No data for sweep."}
+        
+        # 3. Parallel Execution
+        # ProcessPoolExecutor requires picklable objects. 
+        # We'll map a sync wrapper of the simulation.
+        import concurrent.futures
+        loop = asyncio.get_running_loop()
+        
+        results = []
+        with concurrent.futures.ProcessPoolExecutor() as executor:
+            # Note: _simulate is already synchronous, which is good for ProcessPool
+            futures = [executor.submit(self._run_single_sweep, df, comb) for comb in combinations]
+            for future in concurrent.futures.as_completed(futures):
+                results.append(future.result())
+                
+        # 4. Rank by Sharpe
+        results = sorted(results, key=lambda x: x['metrics']['sharpe'], reverse=True)
+        return results
+
+    def _run_single_sweep(self, df, config):
+        """Helper to run a single backtest in a process worker."""
+        # Pre-prep features for this config
+        df_prep = self._prepare_data(df, config)
+        res = self._simulate(df_prep, config)
+        res['config'] = config
+        return res
+
+    def _simulate(self, df, config):
+        """Internal event-driven simulation engine."""
+        exec_config = config.get('execution', {})
+        risk_config = config.get('risk', {})
+        
+        capital = risk_config.get('initial_capital', 100000)
+        initial_capital = capital
+        slippage = exec_config.get('slippage', 0.0005)
+        fee = exec_config.get('fee', 0.0003)
+        
+        equity_curve = []
+        trades = []
+        position = None
+        cooldown = 0
+        
+        # Simulation Loop
+        for i in range(len(df)):
+            row = df.iloc[i]
+            timestamp = df.index[i]
+            
+            # Update Equity
+            cur_price = row['close']
+            ec_val = capital
+            if position:
+                pnl = (cur_price - position['entry']) / position['entry'] if position['direction'] == 'LONG' else \
+                      (position['entry'] - cur_price) / position['entry']
+                ec_val += pnl * position['size']
+            equity_curve.append({'ts': timestamp, 'equity': ec_val})
+            
+            # Exit Logic
+            if position:
+                exit_price, reason = self._check_exit(row, position, slippage)
+                if exit_price:
+                    # Close trade
+                    pnl_pct = (exit_price - position['entry']) / position['entry'] if position['direction'] == 'LONG' else \
+                              (position['entry'] - exit_price) / position['entry']
+                    pnl_raw = pnl_pct * position['size']
+                    costs = (position['size'] * fee) + (position['size'] * (1 + pnl_pct) * fee)
+                    net_pnl = pnl_raw - costs
+                    capital += net_pnl
+                    
+                    trades.append({
+                        'entry_ts': position['entry_ts'],
+                        'exit_ts': timestamp,
+                        'entry': position['entry'],
+                        'exit': exit_price,
+                        'pnl': net_pnl,
+                        'reason': reason
+                    })
+                    position = None
+                    if net_pnl < 0: cooldown = 3 # Simple cooldown
+                continue
+
+            # Entry Logic
+            if cooldown > 0:
+                cooldown -= 1
+                continue
+                
+            # Signal Detection (Mocked for now, integrate with models later)
+            prob = np.random.uniform(0.4, 0.8) # Placeholder
+            if prob > 0.65:
+                direction = 'LONG'
+                risk_pct = risk_config.get('risk_per_trade', 0.01)
+                pos_size = capital * risk_pct * 10 # Leverage example
+                
+                # Check Stop Realism
+                sl_dist = row['atr'] * 2 if 'atr' in row else row['close'] * 0.01
+                tp_dist = sl_dist * 2
+                
+                position = {
+                    'entry_ts': timestamp,
+                    'entry': row['close'] * (1 + slippage),
+                    'size': pos_size,
+                    'stop': row['close'] - sl_dist if direction == 'LONG' else row['close'] + sl_dist,
+                    'target': row['close'] + tp_dist if direction == 'LONG' else row['close'] - tp_dist,
+                    'direction': direction,
+                    'prob': prob
+                }
+
+        metrics = self._calculate_metrics(initial_capital, capital, equity_curve, trades)
+        return {
+            "metrics": metrics,
+            "equity_curve": equity_curve,
+            "trades": trades
+        }
+
+    def _check_exit(self, row, pos, slippage):
+        """Handles gap realism and stop/target checks."""
+        if pos['direction'] == 'LONG':
+            if row['open'] < pos['stop']: # Gap down
+                return row['open'] * (1 - slippage), "STOP (GAP)"
+            if row['low'] <= pos['stop']:
+                return pos['stop'] * (1 - slippage), "STOP"
+            if row['high'] >= pos['target']:
+                return pos['target'] * (1 - slippage), "TARGET"
+        else:
+            if row['open'] > pos['stop']: # Gap up
+                return row['open'] * (1 + slippage), "STOP (GAP)"
+            if row['high'] >= pos['stop']:
+                return pos['stop'] * (1 + slippage), "STOP"
+            if row['low'] <= pos['target']:
+                return pos['target'] * (1 + slippage), "TARGET"
+        return None, None
+
+    def _calculate_metrics(self, initial, final, ec, trades):
+        df_ec = pd.DataFrame(ec).set_index('ts')
+        returns = df_ec['equity'].pct_change().dropna()
+        
+        total_return = (final - initial) / initial
+        sharpe = (returns.mean() / returns.std() * np.sqrt(252 * 375)) if len(returns) > 0 and returns.std() != 0 else 0
+        mdd = (df_ec['equity'] / df_ec['equity'].cummax() - 1).min()
+        
+        win_rate = len([t for t in trades if t['pnl'] > 0]) / len(trades) if trades else 0
+        
+        return {
+            "total_return_pct": total_return * 100,
+            "sharpe": sharpe,
+            "max_drawdown_pct": mdd * 100,
+            "win_rate": win_rate * 100,
+            "total_trades": len(trades)
+        }
+
+    def _save_results(self, results, config):
+        """Stub for DB persistence."""
+        pass
