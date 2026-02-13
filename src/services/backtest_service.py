@@ -160,6 +160,10 @@ class BacktestService:
         exec_config = config.get('execution', {})
         risk_config = config.get('risk', {})
         
+        # Enforce determinism
+        seed = config.get('random_seed', 42)
+        np.random.seed(seed)
+        
         capital = risk_config.get('initial_capital', 100000)
         initial_capital = capital
         slippage = exec_config.get('slippage', 0.0005)
@@ -281,6 +285,10 @@ class BacktestService:
                 }
 
         metrics = self._calculate_metrics(initial_capital, capital, equity_curve, trades)
+        
+        # 5. Export Results (Phase 5: Backtest Reporting)
+        self._export_results(metrics, equity_curve, trades)
+        
         return {
             "metrics": metrics,
             "equity_curve": equity_curve,
@@ -306,22 +314,85 @@ class BacktestService:
         return None, None
 
     def _calculate_metrics(self, initial, final, ec, trades):
+        """
+        Calculates production-grade risk-adjusted performance metrics.
+        """
+        if not ec or not trades:
+            return {"total_return_pct": 0, "sharpe": 0, "total_trades": 0}
+
         df_ec = pd.DataFrame(ec).set_index('ts')
         returns = df_ec['equity'].pct_change().dropna()
         
         total_return = (final - initial) / initial
-        sharpe = (returns.mean() / returns.std() * np.sqrt(252 * 375)) if len(returns) > 0 and returns.std() != 0 else 0
+        
+        # Sharpe (Annualized)
+        # Assuming 1min data, 375 mins per day
+        risk_free_rate = 0.05
+        excess_returns = returns - (risk_free_rate / (252 * 375))
+        sharpe = (excess_returns.mean() / returns.std() * np.sqrt(252 * 375)) if len(returns) > 0 and returns.std() != 0 else 0
+        
+        # Sortino
+        downside_returns = returns[returns < 0]
+        sortino = (excess_returns.mean() / downside_returns.std() * np.sqrt(252 * 375)) if len(downside_returns) > 0 and downside_returns.std() != 0 else 0
+        
+        # Drawdown
         mdd = (df_ec['equity'] / df_ec['equity'].cummax() - 1).min()
         
-        win_rate = len([t for t in trades if t['pnl'] > 0]) / len(trades) if trades else 0
+        # CAGR
+        days = (df_ec.index[-1] - df_ec.index[0]).days
+        if days > 0:
+            cagr = ((final / initial) ** (365.0 / days)) - 1
+        else:
+            cagr = 0
+            
+        # Win Rate & Profit Factor
+        winning_trades = [t for t in trades if t['pnl'] > 0]
+        losing_trades = [t for t in trades if t['pnl'] <= 0]
         
+        win_rate = len(winning_trades) / len(trades)
+        
+        gross_profit = sum(t['pnl'] for t in winning_trades)
+        gross_loss = abs(sum(t['pnl'] for t in losing_trades))
+        profit_factor = gross_profit / gross_loss if gross_loss != 0 else gross_profit
+        
+        expectancy = (win_rate * (gross_profit/len(winning_trades) if winning_trades else 0)) + \
+                     ((1 - win_rate) * (sum(t['pnl'] for t in losing_trades)/len(losing_trades) if losing_trades else 0))
+
         return {
-            "total_return_pct": total_return * 100,
-            "sharpe": sharpe,
-            "max_drawdown_pct": mdd * 100,
-            "win_rate": win_rate * 100,
+            "total_return_pct": float(total_return * 100),
+            "cagr_pct": float(cagr * 100),
+            "sharpe": float(sharpe),
+            "sortino": float(sortino),
+            "max_drawdown_pct": float(mdd * 100),
+            "win_rate_pct": float(win_rate * 100),
+            "profit_factor": float(profit_factor),
+            "expectancy": float(expectancy),
             "total_trades": len(trades)
         }
+
+    def _export_results(self, metrics, ec, trades):
+        """Export artifacts for external analysis."""
+        import os
+        import json
+        
+        output_dir = "backtest_results"
+        os.makedirs(output_dir, exist_ok=True)
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_dir = os.path.join(output_dir, f"run_{timestamp}")
+        os.makedirs(run_dir, exist_ok=True)
+        
+        # Save metrics
+        with open(os.path.join(run_dir, "metrics.json"), "w") as f:
+            json.dump(metrics, f, indent=4)
+            
+        # Save trades
+        pd.DataFrame(trades).to_csv(os.path.join(run_dir, "trades.csv"), index=False)
+        
+        # Save equity curve
+        pd.DataFrame(ec).to_csv(os.path.join(run_dir, "equity_curve.csv"), index=False)
+        
+        logger.info(f"Backtest artifacts exported to {run_dir}")
 
     def _save_results(self, results, config):
         """Stub for DB persistence."""

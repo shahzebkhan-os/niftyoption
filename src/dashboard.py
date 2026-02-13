@@ -8,7 +8,11 @@ from src.data.database import get_engine
 from src.config.settings import settings
 from src.strategy.regime_classifier import RegimeClassifier
 from src.services.backtest_service import BacktestService
+from src.models.model_registry import ModelRegistry
+from src.models.ensemble import RegimeEnsemble
+from src.features.feature_pipeline import build_features
 import asyncio
+import os
 
 # Page Config
 st.set_page_config(
@@ -42,8 +46,58 @@ def fetch_latest_snapshots():
         df = pd.read_sql(text(query), conn)
     return df
 
-def fetch_regime_data():
-    return "TRENDING_UP", {"iv_percentile": 65, "iv_velocity": 0.2}
+@st.cache_resource
+def get_model_ensemble():
+    registry = ModelRegistry()
+    return RegimeEnsemble(registry)
+
+def fetch_live_prediction(df_latest):
+    if df_latest.empty:
+        return None, 0.5
+    
+    # Process through feature pipeline (No lag safety for real-time inference)
+    df_features = build_features(df_latest, lag_safety=False)
+    
+    if df_features.empty:
+        return None, 0.5
+        
+    # Get the latest state (most recent timestamp)
+    latest_ts = df_features['timestamp'].max()
+    latest_df = df_features[df_features['timestamp'] == latest_ts]
+    
+    # Identify ATM strike (closest to spot)
+    spot = latest_df['underlying_price'].iloc[0]
+    atm_strike = latest_df.iloc[(latest_df['strike'] - spot).abs().argsort()[:1]]['strike'].iloc[0]
+    
+    # We focus on the Call side for the primary "Bullish/Bearish" confidence gauge
+    atm_call = latest_df[(latest_df['strike'] == atm_strike) & (latest_df['option_type'] == 'CE')]
+    
+    if atm_call.empty:
+        return latest_df['regime'].iloc[0], 0.5
+        
+    # Features used during training (mapping exactly to src/train_model.py)
+    feature_cols = [
+        'iv_percentile', 'iv_zscore', 'oi_velocity', 'oi_acceleration', 
+        'divergence', 'trap_score', 'net_gex',
+        'delta', 'gamma', 'theta', 'vega', 'iv'
+    ]
+    
+    features = atm_call[feature_cols].iloc[0].values
+    regime = atm_call['regime'].iloc[0]
+    conf = atm_call['regime_confidence'].iloc[0]
+    
+    # Handle NaN confidence (occurs if drift benchmarks aren't initialized yet)
+    if pd.isna(conf):
+        conf = 1.0
+    
+    ensemble = get_model_ensemble()
+    prob = ensemble.predict(features, regime, regime_confidence=conf)
+    
+    return regime, prob
+
+def fetch_regime_data(df_latest):
+    regime, prob = fetch_live_prediction(df_latest)
+    return regime, prob
 
 # Sidebar
 st.sidebar.title("🛠️ Engine Control")
@@ -65,10 +119,14 @@ if not df_latest.empty:
         spot = valid_spot_df['underlying_price'].iloc[0]
         last_update = valid_spot_df['timestamp'].iloc[0]
         
+        # Live Prediction & Regime
+        regime, confidence_prob = fetch_regime_data(df_latest)
+        regime_label = regime.replace("_", " ") if regime else "INITIALIZING"
+        
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Spot Price", f"₹{spot:,.2f}" if spot else "N/A", delta="+0.45%") # Mock delta for UI beauty
-        m2.metric("Market Regime", "TRENDING_UP", delta="BULLISH", delta_color="normal")
-        m3.metric("IV Percentile", "65%", delta="+2%")
+        m1.metric("Spot Price", f"₹{spot:,.2f}" if spot else "N/A")
+        m2.metric("Market Regime", regime_label, delta=regime_label.split()[0] if regime else None)
+        m3.metric("Alpha Confidence", f"{confidence_prob*100:.1f}%")
         m4.metric("Last Data Update", last_update.strftime("%H:%M:%S") if last_update else "N/A")
 
         # --- TABS ---
@@ -95,10 +153,9 @@ if not df_latest.empty:
             c1, c2 = st.columns(2)
             with c1:
                 st.write("### Alpha Signal Confidence")
-                confidence = 0.78
                 fig = go.Figure(go.Indicator(
                     mode = "gauge+number",
-                    value = confidence * 100,
+                    value = confidence_prob * 100,
                     domain = {'x': [0, 1], 'y': [0, 1]},
                     title = {'text': "Prediction Confidence (%)"},
                     gauge = {

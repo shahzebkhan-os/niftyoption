@@ -47,6 +47,7 @@ class RegimeTrainer:
                 max_depth=3, 
                 reg_alpha=0.1,
                 reg_lambda=0.1,
+                random_state=42, # Enforce reproducibility
                 verbose=-1
             )
             fold_model.fit(X_tr, y_tr)
@@ -78,6 +79,7 @@ class RegimeTrainer:
             max_depth=3,
             reg_alpha=1.0,
             reg_lambda=1.0,
+            random_state=42, # Enforce reproducibility
             importance_type='gain',
             verbose=-1
         )
@@ -90,7 +92,38 @@ class RegimeTrainer:
 
         calibrated_model.fit(X, y)
 
-        model_path = os.path.join(self.model_dir, f"{self.regime_name}_model.pkl")
+        # 3. Structured Saving (Phase 3: Reproducibility)
+        import json
+        from datetime import datetime
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        version_dir = os.path.join(self.model_dir, f"{self.regime_name}_{timestamp}")
+        os.makedirs(version_dir, exist_ok=True)
+        
+        model_path = os.path.join(version_dir, "model.pkl")
         joblib.dump(calibrated_model, model_path)
+        
+        metadata = {
+            "regime": self.regime_name,
+            "version": timestamp,
+            "timestamp": datetime.now().isoformat(),
+            "features": feature_columns,
+            "target": target_column,
+            "metrics": {
+                "mean_auc": float(mean_auc),
+                "auc_std": float(auc_std),
+                "num_samples": len(df_regime)
+            },
+            "random_state": 42
+        }
+        
+        with open(os.path.join(version_dir, "metadata.json"), "w") as f:
+            json.dump(metadata, f, indent=4)
+            
+        logger.info(f"Model saved to {version_dir} with metadata.")
+        
+        # Legacy support: also save to root model_dir
+        legacy_path = os.path.join(self.model_dir, f"{self.regime_name}_model.pkl")
+        joblib.dump(calibrated_model, legacy_path)
         
         return calibrated_model

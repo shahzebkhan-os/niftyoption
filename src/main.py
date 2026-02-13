@@ -44,6 +44,13 @@ class OptionsEngine:
         self.live_trades = []
         self.live_equity = [100000.0] # Starting capital
         self.historical_data_sample = pd.DataFrame() 
+        
+        # Production Safety State (Phase 6)
+        self.daily_pnl = 0.0
+        self.last_pnl_reset = datetime.now().date()
+        self.last_alert_time = {} # For throttling
+        self.max_daily_loss = 0.02 * self.live_equity[0] # 2% hard stop
+        self.max_positions = 3
 
     async def initialize_monitoring_data(self):
         """Seeds the monitors with historical benchmarks from the DB."""
@@ -132,9 +139,24 @@ class OptionsEngine:
 
             # Signal Generation
             if prob > settings.SIGNAL_THRESHOLD: 
+                # Circuit Breaker: Model Confidence Stability (Phase 6)
+                if regime_conf < 0.4:
+                    logger.warning(f"CIRCUIT BREAKER: Low regime confidence ({regime_conf:.2f}). Signal suppressed.")
+                    return
+
                 final_prob = prob * capital_scale
                 
                 if final_prob > settings.SIGNAL_THRESHOLD:
+                    # Daily Loss Guard (Phase 6)
+                    today = datetime.now().date()
+                    if today != self.last_pnl_reset:
+                        self.daily_pnl = 0.0
+                        self.last_pnl_reset = today
+                        
+                    if self.daily_pnl <= -self.max_daily_loss:
+                        logger.warning(f"SAFETY GUARD: Daily loss limit hit ({self.daily_pnl:.2f}). No new signals.")
+                        return
+
                     signal_data = {
                         'regime': regime,
                         'symbol': settings.SYMBOL,
@@ -143,9 +165,24 @@ class OptionsEngine:
                         'expiry': df['expiry'].iloc[0],
                         'confidence': final_prob * 100,
                         'governance_state': state,
-                        'risk_level': 'MEDIUM'
+                        'risk_level': 'MEDIUM',
+                        'is_dry_run': settings.DRY_RUN
                     }
-                    await self.telegram.send_alert(signal_data)
+                    
+                    # Alert Throttling (Phase 6: Max 1 alert per 15 mins per regime)
+                    throttle_key = f"{regime}_{signal_data['strike']}"
+                    now = datetime.now()
+                    if throttle_key in self.last_alert_time:
+                        if (now - self.last_alert_time[throttle_key]).total_seconds() < 900:
+                            logger.info(f"THROTTLED: Signal for {throttle_key} suppressed.")
+                            return
+                    
+                    self.last_alert_time[throttle_key] = now
+                    
+                    if settings.DRY_RUN:
+                        logger.info(f"[DRY_RUN] Signal Generated: {signal_data}")
+                    else:
+                        await self.telegram.send_alert(signal_data)
 
         except Exception as e:
             logger.error(f"Cycle execution failed: {e}", exc_info=True)

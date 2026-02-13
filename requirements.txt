@@ -25,3 +25,8 @@ plotly
 growwapi
 python-json-logger
 tqdm
+ruff
+black
+pytest
+pytest-mock
+pytest-asyncio
