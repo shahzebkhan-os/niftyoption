@@ -8,10 +8,7 @@ from src.config.settings import settings
 from src.utils.logger import setup_logging
 from src.data.market_fetcher import MarketDataFetcher
 from src.data.database import get_session, OptionChainSnapshot, init_db
-from src.features.volatility import VolatilityFeatures
-from src.features.greeks import DealerPositioningFeatures
-from src.features.trend import TrendFeatures
-from src.features.order_flow import OrderFlowFeatures
+from src.features.feature_pipeline import build_features
 from src.strategy.regime_classifier import RegimeClassifier
 from src.strategy.risk_manager import RiskManager
 from src.strategy.telegram_bot import TelegramManager
@@ -26,10 +23,6 @@ class OptionsEngine:
         self.telegram = TelegramManager(token=settings.TELEGRAM_BOT_TOKEN, chat_id=settings.TELEGRAM_CHAT_ID)
         self.risk_manager = RiskManager()
         self.regime_classifier = RegimeClassifier()
-        self.dealer_features = DealerPositioningFeatures()
-        self.vol_features = VolatilityFeatures()
-        self.trend_features = TrendFeatures()
-        self.order_flow = OrderFlowFeatures()
         
         # Load Model
         self.model = ModelTrainer()
@@ -83,37 +76,29 @@ class OptionsEngine:
                 await asyncio.sleep(settings.INTERVAL_SECONDS)
 
     def prepare_inference_features(self, df):
-        """Calculates features for the latest snapshot."""
-        # 1. Underlying time-series for technicals
-        underlying_ts = df.groupby('timestamp')['underlying_price'].first().reset_index()
-        underlying_ts.columns = ['timestamp', 'close']
-        underlying_ts = underlying_ts.sort_values('timestamp')
+        """
+        Uses the STEP 2 Institutional Feature Engine to build inference inputs.
+        Ensures that live predictions use the exact same lag-safe logic as training.
+        """
+        if df.empty:
+            return pd.DataFrame()
+
+        # Build features (includes internal lag-safety/shifting)
+        # Note: For live inference, we need the LATEST row that has features.
+        # build_features(df, lag_safety=True) shifts features forward.
+        # So row T will have features from T-1.
+        df_features = build_features(df, lag_safety=True)
         
-        # EMA distances
-        for p in [9, 21, 50]:
-            underlying_ts[f'ema_{p}'] = underlying_ts['close'].ewm(span=p, adjust=False).mean()
+        if df_features.empty:
+            return pd.DataFrame()
+
+        # Extract the latest observation for inference
+        feature_cols = [
+            'iv_percentile', 'iv_zscore', 'oi_velocity', 'oi_acceleration', 
+            'divergence', 'trap_score', 'net_gex'
+        ]
         
-        latest = underlying_ts.iloc[-1].copy()
-        ema_dist_9_21 = (latest['ema_9'] - latest['ema_21']) / latest['ema_21']
-        ema_dist_21_50 = (latest['ema_21'] - latest['ema_50']) / latest['ema_50']
-        
-        # Volatility
-        returns = underlying_ts['close'].pct_change()
-        realized_vol = returns.rolling(window=30).std().iloc[-1] * np.sqrt(375)
-        
-        # 2. Snapshot-based features (GEX, OI)
-        latest_ts = df['timestamp'].max()
-        current_snap = df[df['timestamp'] == latest_ts]
-        gex = self.dealer_features.calculate_net_gex(current_snap, latest['close'])
-        hhi = self.order_flow.calculate_strike_concentration(current_snap)
-        
-        return pd.DataFrame([{
-            'ema_dist_9_21': ema_dist_9_21,
-            'ema_dist_21_50': ema_dist_21_50,
-            'realized_vol': realized_vol,
-            'net_gex': gex.get('net_gex', 0),
-            'oi_hhi': hhi
-        }])
+        return df_features.tail(1)[feature_cols]
 
     async def process_cycle(self):
         logger.info("Processing cycle...")

@@ -6,10 +6,7 @@ import os
 from datetime import datetime, timedelta
 from sqlalchemy import text
 from src.data.database import get_engine
-from src.features.trend import TrendFeatures
-from src.features.volatility import VolatilityFeatures
-from src.features.greeks import DealerPositioningFeatures
-from src.features.order_flow import OrderFlowFeatures
+from src.features.feature_pipeline import build_features
 from src.models.prediction_model import ModelTrainer
 from src.models.target import TargetGenerator
 from src.config.settings import settings
@@ -26,12 +23,6 @@ class TrainingPipeline:
         self.engine = get_engine()
         self.target_gen = TargetGenerator(horizon_minutes=horizon_mins, threshold_points=threshold)
         self.trainer = ModelTrainer()
-        
-        # Feature generators
-        self.trend = TrendFeatures()
-        self.vol = VolatilityFeatures()
-        self.dealer = DealerPositioningFeatures()
-        self.order_flow = OrderFlowFeatures()
 
     def load_raw_data(self, start_date, end_date):
         """Loads historical snapshots from DB."""
@@ -50,81 +41,54 @@ class TrainingPipeline:
             return df
 
     def preprocess_and_feature_engineer(self, df):
-        """Standardizes time-series and calculates features."""
+        """
+        Uses the STEP 2 Institutional Feature Engine to build a robust model input stream.
+        """
         if df.empty:
             return pd.DataFrame()
 
-        logger.info(f"Preprocessing {len(df)} records...")
+        logger.info(f"Processing {len(df)} records with Institutional Feature Engine...")
         
-        # 1. Aggregate to unique timestamps for underlying price
-        underlying_df = df.groupby('timestamp').agg({
-            'underlying_price': 'first',
-            'volume': 'sum'
-        }).reset_index()
-        underlying_df.columns = ['timestamp', 'close', 'volume']
+        # 1. Standardize and Build Features (includes lag-safety)
+        # Note: build_features handles resampling/interpolation via groupby(timestamp)
+        # but here we pass the raw snapshots directly as it handles contract-level logic first.
+        df_features = build_features(df, lag_safety=True)
         
-        # 2. Resample to 1-minute intervals to ensure consistency
-        underlying_df.set_index('timestamp', inplace=True)
-        # Note: If data is sparse, 'ffill' is used but might introduce bias for very many missing bars.
-        # For training, we prefer high density.
-        underlying_df = underlying_df.resample('1min').ffill()
+        if df_features.empty:
+            return pd.DataFrame()
+
+        # 2. Generate Targets
+        # Targets are generated at the contract/timestamp level
+        # IMPORTANT: Target generation uses FUTURE info (look-ahead), 
+        # but the MODEL input (features) is already shifted (lag-safe).
+        logger.info("Generating horizon-based targets...")
+        df_features['target'] = self.target_gen.generate_target(
+            df_features.reset_index(), 
+            price_col='underlying_price', 
+            time_col='timestamp'
+        ).values
         
-        # 3. Individual Snapshot processing (for Greeks/OI)
-        # We'll calculate aggregate GEX/Concentration per timestamp
-        logger.info("Calculating snapshot-based features (GEX, OI concentration)...")
-        snap_features = []
-        for ts, group in df.groupby('timestamp'):
-            gex = self.dealer.calculate_net_gex(group, group['underlying_price'].iloc[0])
-            hhi = self.order_flow.calculate_strike_concentration(group)
-            snap_features.append({
-                'timestamp': ts,
-                'net_gex': gex.get('net_gex', 0),
-                'oi_hhi': hhi
-            })
-        
-        snap_df = pd.DataFrame(snap_features)
-        snap_df['timestamp'] = pd.to_datetime(snap_df['timestamp'])
-        snap_df.set_index('timestamp', inplace=True)
-        snap_df = snap_df.resample('1min').ffill()
-        
-        # 4. Merge
-        final_df = underlying_df.join(snap_df, how='left').ffill()
-        
-        # 5. Calculate derived features
-        logger.info("Computing technical features...")
-        # EMAs
-        for p in [9, 21, 50]:
-            final_df[f'ema_{p}'] = final_df['close'].ewm(span=p, adjust=False).mean()
-        
-        # Trend Score
-        # (Need to implement rolling trend score if possible, or just use EMA distances)
-        final_df['ema_dist_9_21'] = (final_df['ema_9'] - final_df['ema_21']) / final_df['ema_21']
-        final_df['ema_dist_21_50'] = (final_df['ema_21'] - final_df['ema_50']) / final_df['ema_50']
-        
-        # Volatility
-        final_df['returns'] = final_df['close'].pct_change()
-        final_df['realized_vol'] = final_df['returns'].rolling(window=30).std() * np.sqrt(375) # Daily scale approx
-        
-        # Target
-        logger.info("Generating targets...")
-        final_df['target'] = self.target_gen.generate_target(final_df.reset_index(), price_col='close', time_col='timestamp').values
-        
-        return final_df.dropna()
+        return df_features.dropna()
 
     def run_training(self, start_date, end_date):
         """Runs the full pipeline."""
         raw_df = self.load_raw_data(start_date, end_date)
-        if len(raw_df) < 1000:
-            logger.error("Insufficient data for training.")
+        if len(raw_df) < 500: # Threshold for training
+            logger.error(f"Insufficient data ({len(raw_df)}). Need more history.")
             return
 
         processed_df = self.preprocess_and_feature_engineer(raw_df)
         if processed_df.empty:
-            logger.error("Failed to generate features.")
+            logger.error("No features generated. Check data density.")
             return
 
         # Prepare X, y
-        feature_cols = ['ema_dist_9_21', 'ema_dist_21_50', 'realized_vol', 'net_gex', 'oi_hhi']
+        # Using the feature columns defined in the STEP 2 pipeline
+        feature_cols = [
+            'iv_percentile', 'iv_zscore', 'oi_velocity', 'oi_acceleration', 
+            'divergence', 'trap_score', 'net_gex'
+        ]
+        
         X = processed_df[feature_cols]
         y = processed_df['target']
         
