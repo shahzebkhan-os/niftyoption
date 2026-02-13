@@ -83,10 +83,11 @@ class TrainingPipeline:
             return
 
         # Prepare X, y
-        # Using the feature columns defined in the STEP 2 pipeline
+        # Using the feature columns defined in the STEP 2 & 3 pipeline
         feature_cols = [
             'iv_percentile', 'iv_zscore', 'oi_velocity', 'oi_acceleration', 
-            'divergence', 'trap_score', 'net_gex'
+            'divergence', 'trap_score', 'net_gex',
+            'regime_encoded', 'regime_confidence', 'regime_stability'
         ]
         
         X = processed_df[feature_cols]

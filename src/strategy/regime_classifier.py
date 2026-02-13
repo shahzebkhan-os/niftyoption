@@ -1,58 +1,93 @@
-import pandas as pd
 import numpy as np
+import pandas as pd
+import logging
+
+logger = logging.getLogger(__name__)
 
 class RegimeClassifier:
-    def __init__(self):
-        pass
+    def __init__(self,
+                 ema_fast=9,
+                 ema_slow=21,
+                 atr_window=14,
+                 iv_threshold=0.7):
+        self.ema_fast = ema_fast
+        self.ema_slow = ema_slow
+        self.atr_window = atr_window
+        self.iv_threshold = iv_threshold
 
-    def detect_regime(self, df: pd.DataFrame, volatility_features: dict = None) -> str:
+    def detect_regime(self, df: pd.DataFrame):
         """
-        Classifies the current market regime.
-        df should have columns: 'close', 'ema_9', 'ema_21', 'ema_50' (or similar indicators)
-        volatility_features: dict containing 'iv_percentile', 'iv_velocity'
+        Classifies the current market regime based on Trend Strength, 
+        ATR Percentile, and IV Percentile.
         """
-        if df is None or df.empty or 'close' not in df.columns:
-            return "RANGE"
+        if df.empty or len(df) < max(self.ema_slow, self.atr_window):
+            return "RANGE_BOUND"
 
-        # Ensure no None values in comparison columns
-        required_cols = ['close', 'ema_9', 'ema_21', 'ema_50']
-        for col in required_cols:
-            if col not in df.columns or df[col].iloc[-1] is None or pd.isna(df[col].iloc[-1]):
-                return "RANGE"
+        # Always operate on past data only (df should already be filtered/lagged if called from pipeline)
+        latest = df.iloc[-1]
 
-        # 1. Trend Filter
-        ema_aligned_up = (df['close'].iloc[-1] > df['ema_9'].iloc[-1] > df['ema_21'].iloc[-1] > df['ema_50'].iloc[-1])
-        ema_aligned_down = (df['close'].iloc[-1] < df['ema_9'].iloc[-1] < df['ema_21'].iloc[-1] < df['ema_50'].iloc[-1])
-        
-        # 2. Volatility Filter
-        vol_feats = volatility_features or {}
-        iv_percentile = vol_feats.get('iv_percentile', 50)
-        iv_expanding = vol_feats.get('iv_velocity', 0) > 0.5
-        
-        if iv_percentile > 80 and iv_expanding:
-            return "HIGH_IV_EXPANSION"
-        
-        if ema_aligned_up:
+        # Extract metrics
+        trend_strength = latest.get('ema_fast', 0) - latest.get('ema_slow', 0)
+        atr_pct = latest.get('atr_percentile', 0.5)
+        iv_high = latest.get('iv_percentile', 0) > (self.iv_threshold * 100)
+
+        # 1. TRENDING UP
+        if trend_strength > 0 and atr_pct > 0.6:
             return "TRENDING_UP"
-        
-        if ema_aligned_down:
-            return "TRENDING_DOWN"
-            
-        # 3. Range / Mean Reversion
-        # If ADX < 20 (not implemented here, using proxy)
-        # or price is oscillating around EMAs
-        return "RANGE"
 
-    def get_regime_weights(self, regime: str) -> dict:
+        # 2. TRENDING DOWN
+        elif trend_strength < 0 and atr_pct > 0.6:
+            return "TRENDING_DOWN"
+
+        # 3. HIGH VOL EXPANSION
+        elif iv_high and atr_pct > 0.7:
+            return "VOLATILITY_EXPANSION"
+
+        # 4. RANGE BOUND (Default)
+        else:
+            return "RANGE_BOUND"
+
+    def regime_confidence(self, df: pd.DataFrame):
         """
-        Returns strategy mixing weights based on regime.
+        Calculates a confidence score (0.0 to 1.0) for the current regime classification.
         """
-        if regime == "TRENDING_UP":
-            return {'trend_following': 0.8, 'mean_reversion': 0.2}
-        elif regime == "RANGE":
-            return {'trend_following': 0.2, 'mean_reversion': 0.8}
-        elif regime == "HIGH_IV_EXPANSION":
-             # Safe mode or short vega?
-            return {'trend_following': 0.0, 'mean_reversion': 0.0, 'cash': 1.0}
+        if df.empty:
+            return 0.0
+
+        latest = df.iloc[-1]
+
+        # NormalizedTrend (Relative to price)
+        price = latest.get('underlying_price', 1)
+        trend_score = abs(latest.get('ema_fast', 0) - latest.get('ema_slow', 0)) / price
+        # Scale trend score (e.g., 0.5% diff is high confidence)
+        trend_score = np.clip(trend_score / 0.005, 0, 1)
+
+        vol_score = latest.get('atr_percentile', 0)
+        iv_score = latest.get('iv_percentile', 0) / 100.0
+
+        confidence = np.clip(
+            0.4 * trend_score +
+            0.3 * vol_score +
+            0.3 * iv_score,
+            0, 1
+        )
+
+        return confidence
+
+    def regime_stability(self, df: pd.DataFrame, lookback=20):
+        """
+        Detects frequent regime flips. Higher score means more stability.
+        1.0 = No transitions in lookback.
+        0.0 = transitioning every bar.
+        """
+        if 'regime' not in df.columns or len(df) < lookback:
+            return 1.0
+
+        regimes = df['regime'].tail(lookback)
+        transitions = (regimes != regimes.shift(1)).sum()
         
-        return {'trend_following': 0.5, 'mean_reversion': 0.5}
+        # Subtract the first NaN shift
+        if transitions > 0: transitions -= 1
+
+        stability = 1 - (transitions / lookback)
+        return np.clip(stability, 0, 1)

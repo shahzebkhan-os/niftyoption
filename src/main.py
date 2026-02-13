@@ -95,7 +95,8 @@ class OptionsEngine:
         # Extract the latest observation for inference
         feature_cols = [
             'iv_percentile', 'iv_zscore', 'oi_velocity', 'oi_acceleration', 
-            'divergence', 'trap_score', 'net_gex'
+            'divergence', 'trap_score', 'net_gex',
+            'regime_encoded', 'regime_confidence', 'regime_stability'
         ]
         
         return df_features.tail(1)[feature_cols]
