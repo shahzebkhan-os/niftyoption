@@ -175,6 +175,18 @@ class GrowwClient:
                 
             return data
 
+    async def fetch_option_chain(self, symbol: str):
+        """Wrapper for compatibility with Step 1 structure."""
+        return await self.get_option_chain(symbol)
+
+    async def connect(self):
+        """Place holder for session management."""
+        pass
+
+    async def close(self):
+        """Place holder for session management."""
+        pass
+
     def parse_option_chain(self, raw_data, symbol="NIFTY"):
         """
         Parses the production 'pro-option-chain' response with merged live prices.

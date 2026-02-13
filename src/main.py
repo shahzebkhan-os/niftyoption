@@ -6,7 +6,7 @@ import pandas as pd
 from datetime import datetime
 from src.config.settings import settings
 from src.utils.logger import setup_logging
-from src.data.market_data import MarketDataFetcher
+from src.data.market_fetcher import MarketDataFetcher
 from src.data.database import get_session, OptionChainSnapshot, init_db
 from src.features.volatility import VolatilityFeatures
 from src.features.greeks import DealerPositioningFeatures

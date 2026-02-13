@@ -88,3 +88,6 @@ def get_session():
         _engine = get_engine()
     Session = sessionmaker(bind=_engine)
     return Session()
+
+# Alias for compatibility
+SessionLocal = sessionmaker(autocommit=False, autoflush=False)
