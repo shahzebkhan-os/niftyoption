@@ -12,22 +12,41 @@ class ModelRegistry:
 
     def load_models(self):
         """
-        Loads all regime-specific models from the models directory.
+        Loads the latest versioned regime-specific models from the models directory.
+        Expects format: {regime}_{version}.pkl or {regime}_model.pkl
         """
         if not os.path.exists(self.model_dir):
             logger.warning(f"Model directory '{self.model_dir}' not found.")
             return
 
+        # 1. Group files by regime
+        regime_groups = {}
         for file in os.listdir(self.model_dir):
-            if file.endswith("_model.pkl"):
-                # Extract regime name (e.g., TRENDING_UP from TRENDING_UP_model.pkl)
-                regime = file.replace("_model.pkl", "")
-                path = os.path.join(self.model_dir, file)
-                try:
-                    self.models[regime] = joblib.load(path)
-                    logger.info(f"Loaded specialized model for regime: {regime}")
-                except Exception as e:
-                    logger.error(f"Failed to load model {file}: {e}")
+            if file.endswith(".pkl"):
+                # Handle both legacy ({regime}_model.pkl) and versioned ({regime}_{version}.pkl)
+                if "_model.pkl" in file:
+                    regime = file.replace("_model.pkl", "")
+                else:
+                    # Split by last underscore to separate regime from version
+                    parts = file.replace(".pkl", "").rsplit("_", 1)
+                    if len(parts) == 2:
+                        regime = parts[0]
+                    else:
+                        continue
+                
+                if regime not in regime_groups:
+                    regime_groups[regime] = []
+                regime_groups[regime].append(file)
+
+        # 2. Pick the latest for each and load
+        for regime, files in regime_groups.items():
+            latest_file = sorted(files)[-1] # String sort works for YYYY_MM_DD_HHMM
+            path = os.path.join(self.model_dir, latest_file)
+            try:
+                self.models[regime] = joblib.load(path)
+                logger.info(f"Loaded latest model for {regime}: {latest_file}")
+            except Exception as e:
+                logger.error(f"Failed to load model {latest_file}: {e}")
 
     def get_model(self, regime):
         """
