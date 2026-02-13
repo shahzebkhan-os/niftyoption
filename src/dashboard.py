@@ -136,7 +136,7 @@ if not df_latest.empty:
 
         with tab1:
             st.subheader("Interactive Option Chain")
-            cols = ['strike', 'ltp', 'oi', 'oi_change', 'iv', 'delta', 'gamma', 'theta', 'vega', 'rho']
+            cols = ['strike', 'ltp', 'volume', 'oi', 'oi_change', 'iv', 'delta', 'gamma', 'theta', 'vega', 'rho']
             ce_df = df_latest[df_latest['option_type'] == 'CE'][cols].rename(columns=lambda x: f"CE_{x}" if x != 'strike' else x)
             pe_df = df_latest[df_latest['option_type'] == 'PE'][cols].rename(columns=lambda x: f"PE_{x}" if x != 'strike' else x)
             
@@ -144,18 +144,22 @@ if not df_latest.empty:
             chain_merged = pd.merge(ce_df, pe_df, on='strike')
             
             # Better column ordering for the comparison view
-            final_cols = ['CE_ltp', 'CE_oi', 'CE_oi_change', 'CE_iv', 'CE_delta', 'CE_gamma', 'CE_theta', 'CE_vega', 'CE_rho', 
+            final_cols = ['CE_ltp', 'CE_volume', 'CE_oi', 'CE_oi_change', 'CE_iv', 'CE_delta', 'CE_gamma', 'CE_theta', 'CE_vega', 'CE_rho', 
                           'strike', 
-                          'PE_rho', 'PE_vega', 'PE_theta', 'PE_gamma', 'PE_delta', 'PE_iv', 'PE_oi_change', 'PE_oi', 'PE_ltp']
+                          'PE_rho', 'PE_vega', 'PE_theta', 'PE_gamma', 'PE_delta', 'PE_iv', 'PE_oi_change', 'PE_oi', 'PE_volume', 'PE_ltp']
             
             chain_merged = chain_merged[final_cols]
             
             # Color coding rows near ATM
             atm_strike = round(spot / 50) * 50
+            # Display table with specific formatting for Gamma
             st.dataframe(
                 chain_merged.style.highlight_between(
                     left=atm_strike-100, right=atm_strike+100, subset=['strike'], color="rgba(255, 255, 0, 0.1)"
-                ).format(precision=2),
+                ).format({
+                    'CE_gamma': '{:.6f}',
+                    'PE_gamma': '{:.6f}',
+                }, precision=2),
                 use_container_width=True
             )
 
@@ -183,12 +187,31 @@ if not df_latest.empty:
             
             with c2:
                 st.write("### Exposure Distribution")
-                st.json({
-                    "delta_exposure": "0.15 Long",
-                    "gamma_risk": "Theta Positive",
-                    "vega_state": "Neutral",
-                    "trade_cooldown": "Inactive (Ready)"
-                })
+                # Dynamic exposure calculation based on chain data
+                if not df_latest.empty:
+                    # Filter for records with greeks
+                    greeks_df = df_latest.dropna(subset=['delta', 'gamma'])
+                    if not greeks_df.empty:
+                        # Total Delta/Gamma as institutional proxy
+                        total_delta = greeks_df['delta'].sum()
+                        total_gamma = greeks_df['gamma'].sum()
+                        total_vega = greeks_df['vega'].sum()
+                        
+                        st.json({
+                            "net_delta_exposure": f"{total_delta:.2f} {'Long' if total_delta > 0 else 'Short'}",
+                            "gamma_risk": f"{total_gamma:.6f} {'Stability' if total_gamma > 0 else 'Volatility'}",
+                            "vega_state": f"{total_vega:.2f} {'Vol Long' if total_vega > 0 else 'Vol Short'}",
+                            "trade_status": "Ready"
+                        })
+                    else:
+                        st.warning("Greeks not yet processed for live exposure.")
+                else:
+                    st.json({
+                        "delta_exposure": "0.00 Neutral",
+                        "gamma_risk": "N/A",
+                        "vega_state": "Neutral",
+                        "trade_cooldown": "Inactive"
+                    })
 
         with tab3:
             st.subheader("🚀 Institutional Backtrack Testing")
@@ -250,7 +273,7 @@ if not df_latest.empty:
                                     "EMA": r['config']['indicators']['ema_periods'],
                                     "Risk Multi": r['config']['risk']['risk_multiplier'],
                                     "Sharpe": round(r['metrics']['sharpe'], 2),
-                                    "Win Rate": f"{r['metrics']['win_rate']:.1f}%",
+                                    "Win Rate": f"{r['metrics'].get('win_rate_pct', r['metrics'].get('win_rate', 0)):.1f}%",
                                     "MDD": f"{r['metrics']['max_drawdown_pct']:.1f}%"
                                 })
                             st.table(rank_data)
@@ -269,7 +292,7 @@ if not df_latest.empty:
                             m1.metric("Total Return", f"{metrics['total_return_pct']:.1f}%")
                             m2.metric("Sharpe Ratio", f"{metrics['sharpe']:.2f}")
                             m3.metric("Max Drawdown", f"{metrics['max_drawdown_pct']:.1f}%")
-                            m4.metric("Win Rate", f"{metrics['win_rate']:.1f}%")
+                            m4.metric("Win Rate", f"{metrics.get('win_rate_pct', metrics.get('win_rate', 0)):.1f}%")
                             m5.metric("Trades", metrics['total_trades'])
 
                             st.write("### Performance Analytics")

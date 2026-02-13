@@ -36,16 +36,29 @@ class MarketDataFetcher:
             )
             session.add(raw_log)
             
-            # 3. Parse and Store Snapshots
+            # 3. Parse and Enrich Snapshots
             snapshots_data = self.client.parse_option_chain(raw_chain, symbol=self.symbol)
             if not snapshots_data:
                  logger.warning("No snapshots parsed from data.")
             else:
+                 import pandas as pd
+                 from src.features.volatility import enrich_with_greeks
+                 
+                 # Convert to DF for enrichment
+                 df = pd.DataFrame(snapshots_data)
+                 df = enrich_with_greeks(df)
+                 
+                 # Back to list of dicts for DB storage
+                 snapshots_data = df.to_dict('records')
+                 
                  sample_price = snapshots_data[0].get('underlying_price')
-                 logger.info(f"Parsed {len(snapshots_data)} snapshots. Sample Spot: {sample_price}")
+                 logger.info(f"Parsed & Enriched {len(snapshots_data)} snapshots. Sample Spot: {sample_price}")
             
             for item in snapshots_data:
-                snapshot = OptionChainSnapshot(**item)
+                # Clean item for SQLAlchemy (remove extra keys like 'T' if present)
+                valid_keys = {c.key for c in OptionChainSnapshot.__table__.columns}
+                filtered_item = {k: v for k, v in item.items() if k in valid_keys}
+                snapshot = OptionChainSnapshot(**filtered_item)
                 session.add(snapshot)
             
             session.commit()

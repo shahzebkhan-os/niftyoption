@@ -366,6 +366,7 @@ class BacktestService:
             "sortino": float(sortino),
             "max_drawdown_pct": float(mdd * 100),
             "win_rate_pct": float(win_rate * 100),
+            "win_rate": float(win_rate * 100), # Alias for UI consistency
             "profit_factor": float(profit_factor),
             "expectancy": float(expectancy),
             "total_trades": len(trades)

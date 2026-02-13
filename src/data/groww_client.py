@@ -15,13 +15,14 @@ class GrowwClient:
         self.base_url = "https://groww.in"
         self.logger = logging.getLogger(__name__)
         self.headers = {
-            "Authorization": f"Bearer {self.jwt_token}",
             "X-App-Id": "growwWeb",
             "x-platform": "web",
             "x-device-type": "desktop",
             "Content-Type": "application/json",
             "Accept": "application/json"
         }
+        if self.jwt_token:
+            self.headers["Authorization"] = f"Bearer {self.jwt_token}"
         self.symbol_map = {
             "BANKNIFTY": {"chain": "NIFTY-BANK", "spot": "BANKNIFTY"},
             "NIFTYBANK": {"chain": "NIFTY-BANK", "spot": "BANKNIFTY"},
@@ -71,14 +72,28 @@ class GrowwClient:
         async with aiohttp.ClientSession() as session:
             return await self._get(session, endpoint, params)
 
-    async def _post(self, session, endpoint, data=None):
+    async def _post(self, session, endpoint, data=None, retry_public=True):
         url = f"{self.base_url}{endpoint}"
         try:
             async with session.post(url, headers=self.headers, json=data) as response:
                 if response.status in [200, 206]:
                     return await response.json()
+                elif response.status == 429:
+                    self.logger.warning(f"Rate limit hit on POST {url}. Sleeping...")
+                    await asyncio.sleep(1)
+                    return await self._post(session, endpoint, data, retry_public)
+                elif response.status == 401 and retry_public:
+                    self.logger.warning(f"401 Unauthorized on {url}. Retrying without Authorization header...")
+                    headers_public = self.headers.copy()
+                    headers_public.pop("Authorization", None)
+                    async with session.post(url, headers=headers_public, json=data) as retry_resp:
+                        if retry_resp.status in [200, 206]:
+                            return await retry_resp.json()
+                        else:
+                            self.logger.error(f"Public retry failed with status {retry_resp.status} for {url}")
+                            return None
                 elif response.status == 401:
-                    self.logger.warning("Groww API Unauthorized (401). Your JWT token might be expired. Please update GROWW_JWT_TOKEN in .env")
+                    self.logger.warning("Groww API Unauthorized (401). Your JWT token might be expired.")
                     return None
                 else:
                     self.logger.error(f"Error posting to {url}: {response.status}")
@@ -89,7 +104,7 @@ class GrowwClient:
             self.logger.error(f"Exception in POST request: {e}")
             return None
 
-    async def _get(self, session, endpoint, params=None):
+    async def _get(self, session, endpoint, params=None, retry_public=True):
         url = f"{self.base_url}{endpoint}"
         try:
             async with session.get(url, headers=self.headers, params=params) as response:
@@ -98,9 +113,19 @@ class GrowwClient:
                 elif response.status == 429:
                     self.logger.warning("Rate limit hit. Sleeping...")
                     await asyncio.sleep(1)
-                    return await self._get(session, endpoint, params)
+                    return await self._get(session, endpoint, params, retry_public)
+                elif response.status == 401 and retry_public:
+                    self.logger.warning(f"401 Unauthorized on {url}. Retrying without Authorization header...")
+                    headers_public = self.headers.copy()
+                    headers_public.pop("Authorization", None)
+                    async with session.get(url, headers=headers_public, params=params) as retry_resp:
+                        if retry_resp.status == 200:
+                            return await retry_resp.json()
+                        else:
+                            self.logger.error(f"Public retry failed with status {retry_resp.status} for {url}")
+                            return None
                 elif response.status == 401:
-                    self.logger.warning("Groww API Unauthorized (401). Your JWT token might be expired. Please update GROWW_JWT_TOKEN in .env")
+                    self.logger.warning("Groww API Unauthorized (401). Your JWT token might be expired.")
                     return None
                 else:
                     self.logger.error(f"Error fetching {url}: {response.status}")
@@ -172,6 +197,8 @@ class GrowwClient:
                 data = await self._post(session, endpoint, batch)
                 if data and isinstance(data, dict):
                     all_live_data.update(data)
+                # Small throttle to prevent hitting rate limits
+                await asyncio.sleep(0.2)
                 
         return all_live_data
 
