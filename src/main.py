@@ -58,7 +58,11 @@ class OptionsEngine:
             logger.info("Initializing drift monitoring benchmarks...")
             # Load last 1000 snapshots as a historical baseline for feature drift
             with get_session() as session:
-                query = text("SELECT * FROM option_chain_snapshots ORDER BY timestamp DESC LIMIT 1000")
+                query = text("""
+                    SELECT * FROM option_chain_snapshots 
+                    WHERE timestamp >= NOW() - INTERVAL '24 hours'
+                    ORDER BY timestamp DESC LIMIT 1000
+                """)
                 self.historical_data_sample = pd.read_sql(query, session.bind)
                 self.historical_data_sample['timestamp'] = pd.to_datetime(self.historical_data_sample['timestamp'])
             logger.info(f"Loaded {len(self.historical_data_sample)} baseline records.")

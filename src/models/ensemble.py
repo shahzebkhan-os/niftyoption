@@ -22,9 +22,9 @@ class RegimeEnsemble:
 
         if model is None:
             # Fallback for unknown regimes or missing models
-            logger.debug(f"No model found for regime '{regime}'. Returning neutral prediction.")
+            logger.warning(f"No specialized model for regime '{regime}'. System in UNCERTAIN state, returning neutral baseline (0.5).")
             return 0.5 
-
+            
         try:
             # Get probability from specialized model
             # Assumes binary classification, returns prob of class 1

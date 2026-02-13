@@ -125,14 +125,7 @@ class GrowwClient:
                 agg = data.get('optionChain', {}).get('aggregatedDetails', {})
                 return agg.get('expiryDates', [])
             
-        # Final Fallback: Calculate the upcoming Thursday
-        import datetime as dt
-        today = dt.date.today()
-        days_ahead = 3 - today.weekday()
-        if days_ahead < 0:
-            days_ahead += 7
-        next_thursday = today + dt.timedelta(days_ahead)
-        return [next_thursday.strftime("%Y-%m-%d")]
+        return []
 
     async def get_indices_ltp(self, symbol="NIFTY"):
         """
