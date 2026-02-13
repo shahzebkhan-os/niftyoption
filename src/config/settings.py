@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     TELEGRAM_CHAT_ID: Optional[str] = None
     
     # App Settings
-    SYMBOL: str = "NIFTY"
+    SYMBOLS: list[str] = ["NIFTY", "BANKNIFTY"]
     INTERVAL_SECONDS: int = 60
     SIGNAL_THRESHOLD: float = 0.6
     

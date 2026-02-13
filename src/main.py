@@ -25,7 +25,7 @@ logger = setup_logging()
 
 class OptionsEngine:
     def __init__(self):
-        self.fetcher = MarketDataFetcher(symbol=settings.SYMBOL, interval=settings.INTERVAL_SECONDS)
+        self.fetcher = MarketDataFetcher(symbol=settings.SYMBOLS[0], interval=settings.INTERVAL_SECONDS)
         self.telegram = TelegramManager(token=settings.TELEGRAM_BOT_TOKEN, chat_id=settings.TELEGRAM_CHAT_ID)
         self.risk_manager = RiskManager()
         self.regime_classifier = RegimeClassifier()
@@ -90,109 +90,112 @@ class OptionsEngine:
         if self.historical_data_sample.empty:
             await self.initialize_monitoring_data()
 
-        # 1. Fetch Latest Data
-        df = await self.fetcher.get_latest_data()
-        
-        # Fallback to DB if fetcher is empty
-        if df.empty:
-            with get_session() as session:
-                query = session.query(OptionChainSnapshot).order_by(OptionChainSnapshot.timestamp.desc()).limit(200)
-                df = pd.read_sql(query.statement, session.bind)
-        
-        if df.empty:
-            logger.warning("No data snapshots collected.")
-            return
-
-        # 2. Prep Features
-        features_df = self.prepare_inference_features(df)
-        if features_df.empty:
-            return
+        for symbol in settings.SYMBOLS:
+            logger.info(f"--- Processing {symbol} ---")
+            # 1. Fetch Latest Data for specific symbol
+            self.fetcher.symbol = symbol
+            df = await self.fetcher.get_latest_data()
             
-        # 3. Prediction via Regime Ensemble
-        try:
-            latest_features = features_df.iloc[0]
-            core_feature_cols = ['iv_percentile', 'iv_zscore', 'oi_velocity', 'oi_acceleration', 'divergence', 'trap_score', 'net_gex']
+            # Fallback to DB if fetcher is empty
+            if df.empty:
+                with get_session() as session:
+                    query = session.query(OptionChainSnapshot).filter(OptionChainSnapshot.symbol == symbol).order_by(OptionChainSnapshot.timestamp.desc()).limit(200)
+                    df = pd.read_sql(query.statement, session.bind)
             
-            # Check if all core features are present
-            if not all(col in latest_features for col in core_feature_cols):
-                logger.warning("Missing core features for prediction.")
-                return
+            if df.empty:
+                logger.warning(f"No data snapshots collected for {symbol}.")
+                continue
 
-            core_features = latest_features[core_feature_cols].values
-            regime = latest_features.get('regime', 'RANGE_BOUND')
-            regime_conf = latest_features.get('regime_confidence', 1.0)
-            
-            prob = self.ensemble.predict(core_features, regime, regime_conf)
-            logger.info(f"Regime: {regime} | Conf: {regime_conf:.2f} | prob: {prob:.4f}")
-
-            # 4. 🧠 DRIFT GOVERNANCE LAYER
-            feature_report = self.feature_monitor.detect_drift(self.historical_data_sample, features_df, core_feature_cols)
-            perf_report = self.perf_monitor.compare(self.live_trades, self.live_equity)
-            calib_score = 0.0 # Placeholder
-            
-            state = self.drift_controller.evaluate(perf_report, calib_score, feature_report)
-            capital_scale = self.drift_controller.capital_multiplier()
-
-            if state == "SEVERE_DRIFT":
-                logger.critical("SYSTEM PAUSED: Severe drift detected. No trades executed.")
-                return
-
-            # Signal Generation
-            if prob > settings.SIGNAL_THRESHOLD: 
-                # Circuit Breaker: Model Confidence Stability (Phase 6)
-                if regime_conf < 0.4:
-                    logger.warning(f"CIRCUIT BREAKER: Low regime confidence ({regime_conf:.2f}). Signal suppressed.")
-                    return
-
-                final_prob = prob * capital_scale
+            # 2. Prep Features
+            features_df = self.prepare_inference_features(df)
+            if features_df.empty:
+                continue
                 
-                if final_prob > settings.SIGNAL_THRESHOLD:
-                    # Daily Loss Guard (Phase 6)
-                    today = datetime.now().date()
-                    if today != self.last_pnl_reset:
-                        self.daily_pnl = 0.0
-                        self.last_pnl_reset = today
-                        
-                    if self.daily_pnl <= -self.max_daily_loss:
-                        logger.warning(f"SAFETY GUARD: Daily loss limit hit ({self.daily_pnl:.2f}). No new signals.")
-                        return
+            # 3. Prediction via Regime Ensemble
+            try:
+                latest_features = features_df.iloc[0]
+                core_feature_cols = ['iv_percentile', 'iv_zscore', 'oi_velocity', 'oi_acceleration', 'divergence', 'trap_score', 'net_gex']
+                
+                # Check if all core features are present
+                if not all(col in latest_features for col in core_feature_cols):
+                    logger.warning(f"Missing core features for prediction in {symbol}.")
+                    continue
 
-                    signal_data = {
-                        'regime': regime,
-                        'symbol': settings.SYMBOL,
-                        'action': 'IDENTIFIED_MOVE',
-                        'strike': int(df['underlying_price'].iloc[0] // 50 * 50),
-                        'expiry': df['expiry'].iloc[0],
-                        'confidence': final_prob * 100,
-                        'governance_state': state,
-                        'risk_level': 'MEDIUM',
-                        'is_dry_run': settings.DRY_RUN
-                    }
+                core_features = latest_features[core_feature_cols].values
+                regime = latest_features.get('regime', 'RANGE_BOUND')
+                regime_conf = latest_features.get('regime_confidence', 1.0)
+                
+                prob = self.ensemble.predict(core_features, regime, regime_conf)
+                logger.info(f"{symbol} | Regime: {regime} | Conf: {regime_conf:.2f} | prob: {prob:.4f}")
+
+                # 4. 🧠 DRIFT GOVERNANCE LAYER
+                feature_report = self.feature_monitor.detect_drift(self.historical_data_sample, features_df, core_feature_cols)
+                perf_report = self.perf_monitor.compare(self.live_trades, self.live_equity)
+                calib_score = 0.0 # Placeholder
+                
+                state = self.drift_controller.evaluate(perf_report, calib_score, feature_report)
+                capital_scale = self.drift_controller.capital_multiplier()
+
+                if state == "SEVERE_DRIFT":
+                    logger.critical(f"SYSTEM PAUSED for {symbol}: Severe drift detected.")
+                    continue
+
+                # Signal Generation
+                if prob > settings.SIGNAL_THRESHOLD: 
+                    # Circuit Breaker: Model Confidence Stability (Phase 6)
+                    if regime_conf < 0.4:
+                        logger.warning(f"CIRCUIT BREAKER: Low regime confidence ({regime_conf:.2f}) for {symbol}. Signal suppressed.")
+                        continue
+
+                    final_prob = prob * capital_scale
                     
-                    # Alert Throttling (Phase 6: Max 1 alert per 15 mins per regime)
-                    throttle_key = f"{regime}_{signal_data['strike']}"
-                    now = datetime.now()
-                    if throttle_key in self.last_alert_time:
-                        if (now - self.last_alert_time[throttle_key]).total_seconds() < 900:
-                            logger.info(f"THROTTLED: Signal for {throttle_key} suppressed.")
+                    if final_prob > settings.SIGNAL_THRESHOLD:
+                        # Daily Loss Guard (Phase 6)
+                        today = datetime.now().date()
+                        if today != self.last_pnl_reset:
+                            self.daily_pnl = 0.0
+                            self.last_pnl_reset = today
+                            
+                        if self.daily_pnl <= -self.max_daily_loss:
+                            logger.warning(f"SAFETY GUARD: Daily loss limit hit ({self.daily_pnl:.2f}). No new signals.")
                             return
-                    
-                    self.last_alert_time[throttle_key] = now
-                    
-                    if settings.DRY_RUN:
-                        logger.info(f"[DRY_RUN] Signal Generated: {signal_data}")
-                    else:
-                        await self.telegram.send_alert(signal_data)
 
-        except Exception as e:
-            logger.error(f"Cycle execution failed: {e}", exc_info=True)
+                        signal_data = {
+                            'regime': regime,
+                            'symbol': symbol,
+                            'action': 'IDENTIFIED_MOVE',
+                            'strike': int(df['underlying_price'].iloc[0] // 50 * 50),
+                            'expiry': df['expiry'].iloc[0],
+                            'confidence': final_prob * 100,
+                            'governance_state': state,
+                            'risk_level': 'MEDIUM',
+                            'is_dry_run': settings.DRY_RUN
+                        }
+                        
+                        # Alert Throttling (Phase 6: Max 1 alert per 15 mins per regime)
+                        throttle_key = f"{regime}_{symbol}_{signal_data['strike']}"
+                        now = datetime.now()
+                        if throttle_key in self.last_alert_time:
+                            if (now - self.last_alert_time[throttle_key]).total_seconds() < 900:
+                                logger.info(f"THROTTLED: Signal for {throttle_key} suppressed.")
+                                continue
+                        
+                        self.last_alert_time[throttle_key] = now
+                        
+                        if settings.DRY_RUN:
+                            logger.info(f"[DRY_RUN] Signal Generated for {symbol}: {signal_data}")
+                        else:
+                            await self.telegram.send_alert(signal_data)
+
+            except Exception as e:
+                logger.error(f"Cycle execution failed for {symbol}: {e}", exc_info=True)
 
     async def run(self):
         logger.info("Starting Options Intelligence Engine...")
         init_db()
         await self.initialize_monitoring_data()
         
-        await self.telegram.send_message(f"🚀 Options Intelligence Engine ONLINE (Symbol: {settings.SYMBOL})")
+        await self.telegram.send_message(f"🚀 Options Intelligence Engine ONLINE (Symbols: {', '.join(settings.SYMBOLS)})")
         
         while True:
             try:

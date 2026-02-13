@@ -31,19 +31,21 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Helper Functions
-def fetch_latest_snapshots():
+def fetch_latest_snapshots(symbol="NIFTY"):
     engine = get_engine()
     query = """
     SELECT * FROM option_chain_snapshots 
-    WHERE timestamp = (
+    WHERE symbol = :symbol 
+    AND timestamp = (
         SELECT MAX(timestamp) 
         FROM option_chain_snapshots 
-        WHERE underlying_price IS NOT NULL
+        WHERE symbol = :symbol 
+        AND underlying_price IS NOT NULL
     )
     ORDER BY strike ASC
     """
     with engine.connect() as conn:
-        df = pd.read_sql(text(query), conn)
+        df = pd.read_sql(text(query), conn, params={"symbol": symbol})
     return df
 
 @st.cache_resource
@@ -51,7 +53,7 @@ def get_model_ensemble():
     registry = ModelRegistry()
     return RegimeEnsemble(registry)
 
-def fetch_live_prediction(df_latest):
+def fetch_live_prediction(df_latest, symbol="NIFTY"):
     if df_latest.empty:
         return None, 0.5
     
@@ -95,8 +97,8 @@ def fetch_live_prediction(df_latest):
     
     return regime, prob
 
-def fetch_regime_data(df_latest):
-    regime, prob = fetch_live_prediction(df_latest)
+def fetch_regime_data(df_latest, symbol="NIFTY"):
+    regime, prob = fetch_live_prediction(df_latest, symbol=symbol)
     return regime, prob
 
 # Sidebar
@@ -110,7 +112,7 @@ st.title("Intraday Options Intelligence Engine")
 st.write(f"Monitoring **{symbol}** production environment.")
 
 # --- TOP METRICS ---
-df_latest = fetch_latest_snapshots()
+df_latest = fetch_latest_snapshots(symbol=symbol)
 if not df_latest.empty:
     # Filter for non-null spot price to avoid UI crashes
     valid_spot_df = df_latest.dropna(subset=['underlying_price'])
@@ -120,7 +122,7 @@ if not df_latest.empty:
         last_update = valid_spot_df['timestamp'].iloc[0]
         
         # Live Prediction & Regime
-        regime, confidence_prob = fetch_regime_data(df_latest)
+        regime, confidence_prob = fetch_regime_data(df_latest, symbol=symbol)
         regime_label = regime.replace("_", " ") if regime else "INITIALIZING"
         
         m1, m2, m3, m4 = st.columns(4)

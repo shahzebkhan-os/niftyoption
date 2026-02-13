@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 class RetrainOrchestrator:
     def __init__(self, symbol=None):
-        self.symbol = symbol or settings.SYMBOL
+        self.symbol = symbol or settings.SYMBOLS[0]
         self.trainer = WalkForwardTrainer()
         self.pipeline = TrainingPipeline(symbol=self.symbol)
 

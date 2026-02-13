@@ -10,7 +10,7 @@ logger = setup_logging()
 
 async def verify_environment():
     logger.info("--- Environment Verification ---")
-    logger.info(f"Symbol: {settings.SYMBOL}")
+    logger.info(f"Symbols: {settings.SYMBOLS}")
     logger.info(f"Log Level: {settings.LOG_LEVEL}")
     
     if settings.GROWW_JWT_TOKEN and len(settings.GROWW_JWT_TOKEN) > 50:

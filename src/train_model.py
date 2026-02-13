@@ -105,5 +105,5 @@ if __name__ == "__main__":
     end = datetime.now()
     start = end - timedelta(days=180) # 6 months
     
-    pipeline = TrainingPipeline(symbol=settings.SYMBOL)
+    pipeline = TrainingPipeline(symbol=settings.SYMBOLS[0])
     pipeline.run_training(start, end)
