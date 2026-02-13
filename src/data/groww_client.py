@@ -22,6 +22,18 @@ class GrowwClient:
             "Content-Type": "application/json",
             "Accept": "application/json"
         }
+        self.symbol_map = {
+            "BANKNIFTY": {"chain": "NIFTY-BANK", "spot": "BANKNIFTY"},
+            "NIFTYBANK": {"chain": "NIFTY-BANK", "spot": "BANKNIFTY"},
+            "FINNIFTY": {"chain": "NIFTY-FINANCIAL-SERVICES", "spot": "FINNIFTY"},
+            "NIFTY": {"chain": "NIFTY", "spot": "NIFTY"}
+        }
+
+    def _resolve_symbol(self, symbol: str, context: str = "chain") -> str:
+        symbol_upper = symbol.upper()
+        if symbol_upper in self.symbol_map:
+            return self.symbol_map[symbol_upper].get(context, symbol)
+        return symbol
 
     async def get_historical_candles(self, symbol="NIFTY", start_time=None, end_time=None, interval=1):
         """
@@ -29,6 +41,7 @@ class GrowwClient:
         start_time/end_time: datetime objects or ISO strings.
         interval: 1, 5, 15, 30, 60, 1440.
         """
+        symbol = self._resolve_symbol(symbol, context="spot")
         # Convert times to milliseconds
         if isinstance(start_time, str):
             start_ts = int(datetime.fromisoformat(start_time.replace("Z", "+00:00")).timestamp() * 1000)
@@ -103,6 +116,7 @@ class GrowwClient:
         """
         Fetches expiry dates bundled in the pro-option-chain endpoint.
         """
+        symbol = self._resolve_symbol(symbol, context="chain")
         endpoint = f"/v1/pro-option-chain/{symbol.lower()}"
         params = {"responseStructure": "LIST"}
         async with aiohttp.ClientSession() as session:
@@ -126,6 +140,7 @@ class GrowwClient:
         Fetches the underlying spot price for an index using the accord_points endpoint.
         Uses a separate session without the auth JWT to avoid 401s on public routes.
         """
+        symbol = self._resolve_symbol(symbol, context="spot")
         endpoint = f"/v1/api/stocks_data/v1/accord_points/exchange/NSE/segment/CASH/latest_indices_ohlc/{symbol}"
         url = f"{self.base_url}{endpoint}"
         
@@ -172,13 +187,14 @@ class GrowwClient:
         """
         Fetches the option chain and supplements it with live prices.
         """
+        chain_symbol = self._resolve_symbol(symbol, context="chain")
         if not expiry:
             expiries = await self.get_available_expiries(symbol)
             expiry = expiries[0] if expiries else None
             
         if not expiry: return None
 
-        endpoint = f"/v1/pro-option-chain/{symbol.lower()}"
+        endpoint = f"/v1/pro-option-chain/{chain_symbol.lower()}"
         params = {"expiryDate": expiry, "responseStructure": "LIST"}
 
         async with aiohttp.ClientSession() as session:

@@ -57,7 +57,10 @@ class RegimeClassifier:
         latest = df.iloc[-1]
 
         # NormalizedTrend (Relative to price)
-        price = latest.get('underlying_price', 1)
+        price = latest.get('underlying_price', latest.get('price'))
+        if price is None or price == 0:
+            return 0.5 # Default middle probability
+            
         trend_score = abs(latest.get('ema_fast', 0) - latest.get('ema_slow', 0)) / price
         # Scale trend score (e.g., 0.5% diff is high confidence)
         trend_score = np.clip(trend_score / 0.005, 0, 1)
