@@ -281,6 +281,7 @@ class GrowwClient:
                     'gamma': greeks.get('gamma'),
                     'vega': greeks.get('vega'),
                     'theta': greeks.get('theta'),
+                    'rho': greeks.get('rho'),
                     'symbol': symbol,
                     'underlying_price': underlying_price
                 }

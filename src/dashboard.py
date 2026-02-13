@@ -136,10 +136,19 @@ if not df_latest.empty:
 
         with tab1:
             st.subheader("Interactive Option Chain")
-            ce_df = df_latest[df_latest['option_type'] == 'CE'][['strike', 'ltp', 'oi', 'oi_change', 'iv', 'delta']].rename(columns=lambda x: f"CE_{x}" if x != 'strike' else x)
-            pe_df = df_latest[df_latest['option_type'] == 'PE'][['strike', 'ltp', 'oi', 'oi_change', 'iv', 'delta']].rename(columns=lambda x: f"PE_{x}" if x != 'strike' else x)
+            cols = ['strike', 'ltp', 'oi', 'oi_change', 'iv', 'delta', 'gamma', 'theta', 'vega', 'rho']
+            ce_df = df_latest[df_latest['option_type'] == 'CE'][cols].rename(columns=lambda x: f"CE_{x}" if x != 'strike' else x)
+            pe_df = df_latest[df_latest['option_type'] == 'PE'][cols].rename(columns=lambda x: f"PE_{x}" if x != 'strike' else x)
             
+            # Reorder for better readability: CE Greeks | Strike | PE Greeks
             chain_merged = pd.merge(ce_df, pe_df, on='strike')
+            
+            # Better column ordering for the comparison view
+            final_cols = ['CE_ltp', 'CE_oi', 'CE_oi_change', 'CE_iv', 'CE_delta', 'CE_gamma', 'CE_theta', 'CE_vega', 'CE_rho', 
+                          'strike', 
+                          'PE_rho', 'PE_vega', 'PE_theta', 'PE_gamma', 'PE_delta', 'PE_iv', 'PE_oi_change', 'PE_oi', 'PE_ltp']
+            
+            chain_merged = chain_merged[final_cols]
             
             # Color coding rows near ATM
             atm_strike = round(spot / 50) * 50
